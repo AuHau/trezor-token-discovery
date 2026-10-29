@@ -29,7 +29,7 @@ Built incrementally against the implementation plan.
 |---|---|---|
 | 1 | Measurement | ✅ [`docs/measurements.md`](docs/measurements.md) |
 | 2 | Skeleton: domain, ports, config, logging, metrics, CLI | ✅ |
-| 3 | RPC client | ⬜ |
+| 3 | RPC client: limiter, retry, deadlines, error classification | ✅ |
 | 4 | Log decoder | ⬜ |
 | 5 | Pebble store | ⬜ |
 | 6 | Indexer (backfill + tip follower + reorgs) | ⬜ |
@@ -69,7 +69,7 @@ mainnet (2026-10-29, full detail in [`docs/measurements.md`](docs/measurements.m
 | ERC-20 : ERC-721 split | **98.4% : 1.6%** |
 | Logs unclassifiable by shape | **3 in 1,148,860** — which is why there is no ERC-165 probe |
 | `Accept-Encoding: gzip` | **14.5× smaller, 12× faster** — the single most important detail in the RPC client |
-| `eth_getLogs` limits | a 10,000-**block** range cap, and *no* result cap |
+| `eth_getLogs` limits | a 10,000-**block** range cap, *no* result cap — and a bare HTTP 413 past ~200k blocks |
 | Full 50-day backfill | ~1.8k calls, ~9 GB gzipped, **~25 min** |
 | Concurrency | **flat** (238 blocks/s at 1 worker, 278 at 16) — so the backfill is a sequential loop |
 

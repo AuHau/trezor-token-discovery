@@ -104,6 +104,7 @@ must not "helpfully" set the header.
 | 800 blocks / 365,284 logs / 232 MB | **OK — no result cap hit** |
 | Request beyond the tip | `-32602` · `block range extends beyond current head block` |
 | Request fully in the future | `-32602` · `requested block range is in the future` |
+| Range 200,000 blocks | **bare HTTP 413**, no JSON-RPC error body (found in phase 3) |
 
 Two corrections to the plan:
 
@@ -113,6 +114,12 @@ Two corrections to the plan:
    would be a 3.6 GB response. The range must be chosen for a sane response size, not for a result
    limit. **200 blocks ≈ 73 MB decoded / ~4 MB wire** is a good default.
 2. The tip follower must clamp to the known head: over-requesting returns `-32602`, not an empty result.
+3. **An oversized range is signalled two different ways.** A modest over-request (10,001 blocks) returns
+   a `-32614` JSON-RPC error, but a large one (200,000 blocks) is rejected with a bare **HTTP 413**
+   before any JSON-RPC error exists. Both mean "make the request smaller", so the client classifies 413
+   as splittable rather than permanent — otherwise the indexer would give up instead of halving. This
+   was found by the phase-3 integration test, not the phase-1 probe, because the probe only went up to
+   100,000 blocks.
 
 ## Transfer and decode cost
 
