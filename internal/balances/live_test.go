@@ -83,6 +83,7 @@ func newLive(t *testing.T, store *recordingStore, chain *fakeChain, budget time.
 	if err != nil {
 		t.Fatalf("NewLive: %v", err)
 	}
+	t.Cleanup(l.Close)
 	return l, m
 }
 
@@ -448,5 +449,118 @@ func TestLiveRereadsAnOldCleanEntry(t *testing.T) {
 	}
 	if b := resolve(at); b.Status != StatusStale || b.Raw.Int64() != 100 || b.Err == "" {
 		t.Errorf("failed re-read = %+v, want the old value marked stale", b)
+	}
+}
+
+func TestLiveReadOutlivesTheBudget(t *testing.T) {
+	// Under load a read can take longer than a request will wait. Throwing it
+	// away at the budget is what stopped a cold cache from ever filling.
+	token := addr(1)
+	release := make(chan struct{})
+	chain := &fakeChain{}
+	chain.read = func(ctx context.Context, tokens []domain.TokenRef) ([]domain.Balance, error) {
+		<-release
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return []domain.Balance{{Token: token, Raw: big.NewInt(1), Block: liveHead}}, nil
+	}
+	store := &recordingStore{}
+	l, _ := newLive(t, store, chain, time.Millisecond)
+
+	got, err := l.Resolve(context.Background(), liveChain, addr(9), []domain.Address{token}, liveHead)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got[token].Status != StatusUnavailable {
+		t.Errorf("got %+v, want unavailable once the budget has passed", got[token])
+	}
+	close(release)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		store.mu.Lock()
+		n := len(store.puts)
+		store.mu.Unlock()
+		if n == 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the read was not written back after the budget passed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestLiveShedsReadsPastTheLimit(t *testing.T) {
+	// Demand above the provider rate cannot be queued away, so a request past the
+	// limit gets the cache's answer at once instead of waiting out its budget.
+	token := addr(1)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	chain := &fakeChain{}
+	chain.read = func(ctx context.Context, tokens []domain.TokenRef) ([]domain.Balance, error) {
+		close(started)
+		<-release
+		return nil, nil
+	}
+	m := obs.NewMetrics()
+	l, err := NewLive(&recordingStore{}, chain, LiveOptions{Budget: time.Hour, MaxReads: 1, Metrics: m})
+	if err != nil {
+		t.Fatalf("NewLive: %v", err)
+	}
+	t.Cleanup(func() {
+		close(release)
+		l.Close()
+	})
+
+	go l.Resolve(context.Background(), liveChain, addr(8), []domain.Address{token}, liveHead)
+	<-started
+
+	got, err := l.Resolve(context.Background(), liveChain, addr(9), []domain.Address{token}, liveHead)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got[token].Status != StatusUnavailable {
+		t.Errorf("got %+v, want unavailable", got[token])
+	}
+	if chain.reads.Load() != 1 {
+		t.Errorf("%d chain reads, want 1", chain.reads.Load())
+	}
+	if n := testutil.ToFloat64(m.BalanceReadsShed); n != 1 {
+		t.Errorf("shed = %v, want 1", n)
+	}
+}
+
+func TestLiveCloseStopsReadsBeforeTheStoreCloses(t *testing.T) {
+	// A read ends by writing to the store, and Pebble panics on a closed
+	// database, so Close has to wait for it. This crashed serve on SIGTERM.
+	token := addr(1)
+	started := make(chan struct{})
+	var finished atomic.Bool
+	chain := &fakeChain{}
+	chain.read = func(ctx context.Context, tokens []domain.TokenRef) ([]domain.Balance, error) {
+		close(started)
+		<-ctx.Done()
+		time.Sleep(10 * time.Millisecond)
+		finished.Store(true)
+		return nil, ctx.Err()
+	}
+	l, _ := newLive(t, &recordingStore{}, chain, time.Millisecond)
+
+	if _, err := l.Resolve(context.Background(), liveChain, addr(9), []domain.Address{token}, liveHead); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	<-started
+	l.Close()
+	if !finished.Load() {
+		t.Error("Close returned while a read was still running")
+	}
+
+	if _, err := l.Resolve(context.Background(), liveChain, addr(7), []domain.Address{token}, liveHead); err != nil {
+		t.Fatalf("Resolve after Close: %v", err)
+	}
+	if chain.reads.Load() != 1 {
+		t.Errorf("%d chain reads, want none after Close", chain.reads.Load())
 	}
 }

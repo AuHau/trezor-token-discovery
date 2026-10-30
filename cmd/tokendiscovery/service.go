@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
 
 	"tokendiscovery/internal/balances"
@@ -42,8 +43,8 @@ func openService(ctx context.Context, cfg config.Config, log *slog.Logger, m *ob
 			// a few hundred bytes and should fail fast so a tick can retry.
 			"eth_getLogs":          cfg.Chain.RPCTimeout,
 			"eth_getBlockByNumber": 15 * time.Second,
-			// Balance reads carry their own much shorter budget; this bounds
-			// the metadata and direct callers that do not.
+			// Requests stop waiting on a balance read at BalanceBudget, while the
+			// read goes on to fill the cache; this bounds each of its calls.
 			"eth_call": 15 * time.Second,
 		},
 		Retry:   rpc.DefaultRetry(),
@@ -99,9 +100,12 @@ func openService(ctx context.Context, cfg config.Config, log *slog.Logger, m *ob
 	}
 
 	bal, err := balances.NewLive(st, registry, balances.LiveOptions{
-		Budget:  cfg.Chain.BalanceBudget,
-		Logger:  log,
-		Metrics: m,
+		Budget: cfg.Chain.BalanceBudget,
+		// About a second of queue at the RPC rate, so an admitted read still
+		// starts soon and the indexer sharing the bucket is not held up.
+		MaxReads: int(math.Ceil(cfg.Chain.RPCRate)),
+		Logger:   log,
+		Metrics:  m,
 	})
 	if err != nil {
 		_ = st.Close()
@@ -118,4 +122,9 @@ func openService(ctx context.Context, cfg config.Config, log *slog.Logger, m *ob
 	}, nil
 }
 
-func (s *service) Close() error { return s.store.Close() }
+// Close stops the balance reads first, because a read ends by writing to the
+// store and Pebble panics on a closed database.
+func (s *service) Close() error {
+	s.balances.Close()
+	return s.store.Close()
+}

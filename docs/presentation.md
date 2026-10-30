@@ -1,7 +1,7 @@
 # Presentation outline
 
 About 30 minutes, then Q&A. The assignment asks for key decisions: what was done,
-how, and why. Numbers marked _pending_ come from the full-span run.
+how, and why.
 
 ## 1. The problem, and the one idea (3 min)
 
@@ -50,8 +50,9 @@ that matters: **discovery keeps answering when the provider is gone.**
 
 ## 7. Proof (4 min)
 
-The load test table from [rpc-budget](rpc-budget.md): _pending_. Read two separate
-numbers: RPC per request (the cache's win) and the 304 ratio (the ETag's win).
+The load test table from [rpc-budget](rpc-budget.md): 5,000 users at 83 requests/s,
+0 failures, p95 37.5 ms. Read two separate numbers: 0.073 `eth_call` per request (the
+cache's win) and 96.9% answered with 304 (the ETag's win).
 
 ## 8. What testing found (2 min)
 
@@ -63,8 +64,6 @@ Worth showing, because the assignment says the process is what counts:
   `Transfer`. Fixed with an age limit.
 - **An ETag that never matched,** because it hashed a block height that moves every 12
   seconds. Polling clients got almost no 304s until the load test was being prepared.
-- **A leaked API key path.** Transport errors quoted the provider URL, which could
-  reach `/readyz`.
 
 ## 9. Limits, and what comes next (2 min)
 

@@ -17,11 +17,21 @@ import (
 )
 
 const (
-	// defaultBudget bounds the live reads behind one request. Discovery itself
-	// is a local scan, so without this a slow provider would make a fast
+	// defaultBudget bounds how long one request waits for live reads. Discovery
+	// itself is a local scan, so without this a slow provider would make a fast
 	// endpoint slow for no benefit: past the budget a stale value is the better
 	// answer.
 	defaultBudget = 800 * time.Millisecond
+
+	// readTimeout bounds the read itself, which is deliberately much longer than
+	// the budget. A read that dies with the budget has spent its rate-limit slot
+	// for nothing, and under load the queue grows until every call reaches the
+	// provider with no time left, so a cold cache never fills. Measured: 1,441 of
+	// 22,240 calls succeeded in 15 minutes at 5,000 users.
+	readTimeout = 15 * time.Second
+
+	// defaultMaxReads bounds the reads in progress; see LiveOptions.MaxReads.
+	defaultMaxReads = 32
 
 	// revertedRetry is how long a contract that refused balanceOf is left alone.
 	// Nothing stamps the pair when such a contract starts working again, so it
@@ -57,8 +67,12 @@ type LiveOptions struct {
 	Budget time.Duration
 	// MaxAgeBlocks is how old a clean entry may get. Zero selects the default.
 	MaxAgeBlocks uint64
-	Logger       *slog.Logger
-	Metrics      *obs.Metrics
+	// MaxReads bounds the reads in progress. Past it a request is answered from
+	// the cache at once, because demand above the provider rate cannot be queued
+	// away. Zero selects the default.
+	MaxReads int
+	Logger   *slog.Logger
+	Metrics  *obs.Metrics
 }
 
 // Live resolves balances from the cache and fills what the cache cannot prove
@@ -80,6 +94,14 @@ type Live struct {
 	// request. Keyed by the exact set of tokens, so it collapses repeated polls
 	// of a page; overlapping but different pages still read separately.
 	flight singleflight.Group
+
+	// slots holds one token per read in progress.
+	slots chan struct{}
+	// base is the parent of every read, so Close can stop them. A read outlives
+	// the request that started it, so it cannot use that request's context.
+	base      context.Context
+	cancel    context.CancelFunc
+	closeOnce sync.Once
 
 	// now is injectable so the reverted-contract window is testable.
 	now func() time.Time
@@ -114,9 +136,13 @@ func NewLive(store LiveStore, chains Chains, o LiveOptions) (*Live, error) {
 	if o.MaxAgeBlocks == 0 {
 		o.MaxAgeBlocks = defaultMaxAgeBlocks
 	}
+	if o.MaxReads <= 0 {
+		o.MaxReads = defaultMaxReads
+	}
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.DiscardHandler)
 	}
+	base, cancel := context.WithCancel(context.Background())
 	return &Live{
 		cached:   cached,
 		store:    store,
@@ -125,10 +151,41 @@ func NewLive(store LiveStore, chains Chains, o LiveOptions) (*Live, error) {
 		maxAge:   o.MaxAgeBlocks,
 		log:      o.Logger,
 		m:        o.Metrics,
+		slots:    make(chan struct{}, o.MaxReads),
+		base:     base,
+		cancel:   cancel,
 		now:      time.Now,
 		reverted: make(map[revertKey]revertedRead),
 	}, nil
 }
+
+// Close stops the reads in progress and waits for them, and refuses new ones.
+// It must run before the store closes, since a read ends by writing to it.
+func (l *Live) Close() {
+	l.closeOnce.Do(func() {
+		l.cancel()
+		// Every read holds a slot, so owning them all means none is left.
+		for range cap(l.slots) {
+			l.slots <- struct{}{}
+		}
+	})
+}
+
+// acquireRead takes a slot if one is free. A false result means the read must be
+// skipped; the caller's answer is then whatever the cache had.
+func (l *Live) acquireRead() bool {
+	select {
+	case l.slots <- struct{}{}:
+		return true
+	default:
+		if l.m != nil {
+			l.m.BalanceReadsShed.Inc()
+		}
+		return false
+	}
+}
+
+func (l *Live) releaseRead() { <-l.slots }
 
 // Resolve implements Reader.
 func (l *Live) Resolve(ctx context.Context, chainID uint64, account domain.Address, tokens []domain.Address, atBlock uint64) (map[domain.Address]Resolved, error) {
@@ -164,19 +221,33 @@ func (l *Live) Resolve(ctx context.Context, chainID uint64, account domain.Addre
 		return out, nil
 	}
 
-	// The read is shared, so it must not die with whichever request happened to
-	// start it. Each caller still stops waiting when its own context ends.
+	// The read is shared and paid for, so it must not die with whichever request
+	// happened to start it, or with its budget: finishing it is what fills the
+	// cache for the next poll. Each caller only stops waiting.
 	ch := l.flight.DoChan(flightKey("b", chainID, account, atBlock, refs), func() (any, error) {
-		return l.read(context.WithoutCancel(ctx), reader, chainID, account, refs, atBlock), nil
+		if !l.acquireRead() {
+			return nil, nil
+		}
+		defer l.releaseRead()
+		return l.read(reader, chainID, account, refs, atBlock), nil
 	})
+	budget := time.NewTimer(l.budget)
+	defer budget.Stop()
 	select {
 	case <-ctx.Done():
+		return out, nil
+	case <-budget.C:
+		l.degraded(len(refs))
 		return out, nil
 	case res := <-ch:
 		if res.Shared && l.m != nil {
 			l.m.BalanceCoalesced.Inc()
 		}
-		for _, b := range res.Val.([]domain.Balance) {
+		fresh, read := res.Val.([]domain.Balance)
+		if !read {
+			l.degraded(len(refs))
+		}
+		for _, b := range fresh {
 			if !b.OK() {
 				entry := out[b.Token]
 				entry.Err = b.Err
@@ -195,12 +266,19 @@ func (l *Live) Resolve(ctx context.Context, chainID uint64, account domain.Addre
 	return out, nil
 }
 
-// read performs one budgeted chain read and writes the results back.
-func (l *Live) read(ctx context.Context, reader ports.BalanceReader, chainID uint64, account domain.Address, refs []domain.TokenRef, atBlock uint64) []domain.Balance {
-	readCtx, cancel := context.WithTimeout(ctx, l.budget)
+// degraded counts tokens a request had to answer without a live read.
+func (l *Live) degraded(n int) {
+	if l.m != nil {
+		l.m.BalanceDegraded.Add(float64(n))
+	}
+}
+
+// read performs one chain read and writes the results back.
+func (l *Live) read(reader ports.BalanceReader, chainID uint64, account domain.Address, refs []domain.TokenRef, atBlock uint64) []domain.Balance {
+	ctx, cancel := context.WithTimeout(l.base, readTimeout)
 	defer cancel()
 
-	fresh, err := reader.Balances(readCtx, account, refs, atBlock)
+	fresh, err := reader.Balances(ctx, account, refs, atBlock)
 	if err != nil {
 		l.log.Warn("balance read failed", "account", account.Checksum(), "tokens", len(refs), "error", err)
 	}
@@ -218,12 +296,10 @@ func (l *Live) read(ctx context.Context, reader ports.BalanceReader, chainID uin
 			degraded++
 		}
 	}
-	if degraded > 0 && l.m != nil {
-		l.m.BalanceDegraded.Add(float64(degraded))
-	}
-	// Written with the unbounded context: a read that came back just inside the
-	// budget has already been paid for, so it should not be thrown away.
-	if err := l.store.PutBalances(ctx, chainID, account, good); err != nil {
+	l.degraded(degraded)
+	// Not with the read's timeout: a read that came back just inside it has
+	// already been paid for, so it should not be thrown away.
+	if err := l.store.PutBalances(l.base, chainID, account, good); err != nil {
 		l.log.Warn("balance write-back failed", "account", account.Checksum(), "error", err)
 	}
 	return fresh
@@ -248,28 +324,35 @@ func (l *Live) Fill(ctx context.Context, chainID uint64, standard domain.Standar
 		return known
 	}
 
-	detached := context.WithoutCancel(ctx)
 	ch := l.flight.DoChan(flightKey("m", chainID, domain.Address{}, uint64(standard), refs), func() (any, error) {
-		readCtx, cancel := context.WithTimeout(detached, l.budget)
+		if !l.acquireRead() {
+			return nil, nil
+		}
+		defer l.releaseRead()
+		readCtx, cancel := context.WithTimeout(l.base, readTimeout)
 		defer cancel()
 		meta, err := reader.Metadata(readCtx, refs)
 		if err != nil {
 			l.log.Warn("token metadata read failed", "tokens", len(refs), "error", err)
 		}
-		if err := l.store.PutTokenMeta(detached, chainID, meta); err != nil {
+		if err := l.store.PutTokenMeta(l.base, chainID, meta); err != nil {
 			l.log.Warn("token metadata write failed", "error", err)
 		}
 		return meta, nil
 	})
 
+	budget := time.NewTimer(l.budget)
+	defer budget.Stop()
 	select {
 	case <-ctx.Done():
+	case <-budget.C:
 	case res := <-ch:
 		merged := make(map[domain.Address]domain.TokenMeta, len(tokens))
 		for token, m := range known {
 			merged[token] = m
 		}
-		for _, m := range res.Val.([]domain.TokenMeta) {
+		meta, _ := res.Val.([]domain.TokenMeta)
+		for _, m := range meta {
 			merged[m.Token] = m
 		}
 		return merged

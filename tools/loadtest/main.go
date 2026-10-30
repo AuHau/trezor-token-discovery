@@ -44,6 +44,7 @@ func main() {
 	accountsFile := flag.String("accounts", "", "file of account addresses (default: harvest from RPC_URL)")
 	saveAccounts := flag.String("save-accounts", "", "write the accounts used to this file")
 	harvestBlocks := flag.Uint64("harvest-blocks", 50, "recent blocks to harvest accounts from")
+	warmup := flag.Int("warmup", 1, "periods left out of the steady-state total while the cache fills")
 	flag.Parse()
 
 	accounts, err := loadAccounts(*accountsFile, *harvestBlocks, *users)
@@ -75,7 +76,7 @@ func main() {
 		wg.Go(func() { poll(ctx, client, url, *period, rec) })
 	}
 
-	report(ctx, *base, *period, rec)
+	report(ctx, *base, *period, *warmup, rec)
 	wg.Wait()
 }
 
@@ -165,8 +166,8 @@ func (r *recorder) drain() []sample {
 }
 
 // report prints one row per period, then a total for the steady state: every
-// period after the first.
-func report(ctx context.Context, base string, period time.Duration, rec *recorder) {
+// period after the warm-up.
+func report(ctx context.Context, base string, period time.Duration, warmup int, rec *recorder) {
 	fmt.Printf("%-7s %7s %6s %6s %6s %6s %5s %7s %8s %8s %8s %6s\n",
 		"period", "reqs", "rps", "p50", "p95", "p99", "fail", "304%", "tokens", "degraded", "eth_call", "getLogs")
 
@@ -192,7 +193,7 @@ func report(ctx context.Context, base string, period time.Duration, rec *recorde
 			now = last
 		}
 		printRow(strconv.Itoa(n), samples, period, now.sub(last))
-		if n == 1 {
+		if n <= warmup {
 			steadyStart = now
 		} else {
 			steady = append(steady, samples...)
@@ -206,7 +207,7 @@ func report(ctx context.Context, base string, period time.Duration, rec *recorde
 	if len(steady) == 0 {
 		return
 	}
-	elapsed := time.Since(started) - period
+	elapsed := time.Since(started) - time.Duration(warmup)*period
 	fmt.Println()
 	printRow("steady", steady, elapsed, last.sub(steadyStart))
 	delta := last.sub(steadyStart)
@@ -272,6 +273,11 @@ func scrape(base string) (metrics, error) {
 		line := sc.Text()
 		name, value, ok := splitSample(line)
 		if !ok {
+			continue
+		}
+		// A call cancelled while queueing for the rate limiter never reached the
+		// provider, and this report counts what the provider was asked.
+		if strings.Contains(name, `outcome="canceled"`) {
 			continue
 		}
 		switch {

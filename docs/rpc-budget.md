@@ -8,10 +8,10 @@ mainnet; everything else is arithmetic from those numbers and is labelled.
 
 | | Calls | Basis |
 |---|---|---|
-| **Backfill**, one-off, 365,796 blocks | ~1,830 `eth_getLogs` | 200 blocks per call. Measured: _pending_ |
+| **Backfill**, one-off, 371,574 blocks | ~1,860 `eth_getLogs` | Arithmetic at 200 blocks per call. The run took 1h23m48s and logged no warnings, so no range was halved |
 | **Tip following** | ~29,300 / day | One head poll per 4 s (21,600), one `eth_getLogs` per block (7,200), safe and finalized tags every 6 min (480). Measured at about 22 per minute, or ~31,700 / day |
 | **Discovery request** | 0 | A local prefix scan |
-| **Balance request, steady state** | _pending_ per request | Only entries a transfer touched, or that reached the age limit |
+| **Balance request, steady state** | 0.073 `eth_call` per request, measured | Only entries a transfer touched, or that reached the age limit |
 | **Age limit** | at most 5,000 batches / day at 5k users | Arithmetic: one batch per active account per day. This is what re-reading rebasing tokens costs |
 
 On **Linea** the same arithmetic gives ~250 `eth_getLogs` for the whole 501k-block
@@ -32,7 +32,7 @@ Without an index, each poll has to ask the node about the account directly: one
 |---|---|
 | Naive: 2 `eth_getLogs` per poll, before any balance read | **14,400,000** |
 | This service: tip following | ~31,700 |
-| This service: balance refreshes | _pending_ |
+| This service: balance refreshes | ~526,000 (arithmetic from the measured 365 `eth_call` per minute) |
 
 ## Why it is this cheap
 
@@ -54,13 +54,33 @@ a running `serve`, on real accounts taken from recent transfers. Those accounts 
 active, since dormant wallets do not appear in recent logs, so a real population
 should be cheaper than this one.
 
-_Results pending: they need the full-span store, because on a short index accounts
-hold only a few tokens and the numbers would flatter the design._
+Results from the full-span store on mainnet, 20 minutes (`-duration 20m -warmup 10`),
+starting with a cold balance cache. Steady state is the last 10 periods:
+
+| Period | Requests | p50 | p95 | p99 | Failed | 304 | `eth_call` / period | `eth_getLogs` / period |
+|---|---|---|---|---|---|---|---|---|
+| 1 to 4, cache filling | 19,968 | 1.6 to 2 ms | ~805 ms | ~807 ms | 0 | 0.3% to 62.9% | ~1,480 | 4 to 6 |
+| 5 to 10, settling | 30,005 | 1.1 to 1.3 ms | 6.2 to 42.7 ms | 41.1 to 69.1 ms | 0 | 66.0% to 96.6% | 189 to 746 | 5 |
+| **11 to 20, steady state** | **49,976** | **1.2 ms** | **37.5 ms** | **48 ms** | **0** | **96.9%** | **365 on average** | **~5** |
+
+- **Cost:** 0.073 `eth_call` per request in steady state, and about 0.11 over the whole
+  run. The provider rate-limited nothing, and the log has no warnings or errors.
+- **A cold cache costs about five minutes.** Requests wait out the 800 ms budget and most
+  tokens come back `stale` or `unavailable`, but nothing fails.
+- **Degraded tokens:** `td_balance_degraded_total` rose by 43,691 in steady state, about
+  4% of ~1.1M balance lookups. Response bodies showed 20,909 non-`ok` tokens out of
+  42,431, but that 49% describes only the ~3% of responses that were not 304, so it
+  is not the rate users see.
+- **Latency is not flat in steady state.** p95 sat near 40 ms in periods 11 to 15, where
+  `eth_call` rose to 372 to 668 per period, and near 6 ms otherwise. The cause is unknown.
+- **Misses are unexplained.** 436,571 steady-state lookups, about 40%, missed the cache,
+  against only 2,332 marked dirty by a transfer. Until that is explained, 0.073 is what
+  was measured and not necessarily the floor.
 
 ## What it does not measure
 
 - The harness and the service share a machine, so latency includes their contention.
-- A few minutes of steady state does not reach the one-day age limit, so those
+- Ten minutes of steady state does not reach the one-day age limit, so those
   re-reads are in the arithmetic above and not in the measured rows.
 - One provider on one plan. A different provider's limits change where a cold cache
   starts to degrade.

@@ -19,8 +19,8 @@ would take. Numbers come from [measurements](measurements.md) and the
 | Limit | What happens |
 |---|---|
 | **Rebasing tokens can be up to a day out of date while reading `ok`.** | stETH and aTokens change without a `Transfer`, so nothing invalidates them, and a clean entry is only re-read after 7,200 blocks. This is the one case where `ok` overstates. Summing transfers would be worse: wrong for the same tokens and for fee-on-transfer tokens, with drift that never heals. A shorter limit for known rebasers would tighten it. |
-| **Budget.** Live reads get 800 ms per request. | Past that, a token is `stale` or `unavailable`, never an error and never a guessed zero. A cold cache at full load hits this, as measured in the [load test](rpc-budget.md). |
-| **Rate limit.** The RPC client's bucket is 25 requests/s, shared with the indexer. | Past it, reads queue up to their budget and then degrade the same way. |
+| **Budget.** A request waits 800 ms for live reads. | Past that, a token is `stale` or `unavailable`, never an error and never a guessed zero, and the read carries on to fill the cache for the next poll. A cold cache at full load hits this, as measured in the [load test](rpc-budget.md). |
+| **Rate limit.** The RPC client's bucket is 25 requests/s, shared with the indexer. | It sets how fast a cold cache can fill. At most about a second's worth of reads run at once, and a request past that is answered from the cache at once, degraded the same way. |
 | **Coalescing is per page.** | Concurrent requests for the same page share a read. Overlapping pages of different sizes do not. Batching across accounts would cut a cold-cache stampede further and is not built. |
 | **Reverting contracts** are not retried for 10 minutes. | A contract that recovers shows `unavailable` for up to that long. The memory is per process and bounded. |
 | **Gas burners.** | One that sinks its batch is isolated by bisection. One that does not can make later tokens in the batch fail; balances recover after the 10-minute window, but metadata recorded as absent stays absent for the life of the store. |
@@ -59,7 +59,7 @@ would take. Numbers come from [measurements](measurements.md) and the
 
 | Limit | What happens | To lift it |
 |---|---|---|
-| **Two-step startup.** | `serve` refuses a store that never finished a backfill, so a new deployment waits for it (~1 h) or starts from a checkpoint. | — |
+| **Two-step startup.** | `serve` refuses a store that never finished a backfill, so a new deployment waits for it (~85 min) or starts from a checkpoint. | — |
 | **`checkpoint` needs the service stopped.** | Pebble locks the directory, so the command fails against a running `serve`. Cloning a warm store means taking an instance out of rotation. | An admin endpoint on `serve`: `Store.Checkpoint` already works on an open store. |
 | **Each instance runs its own indexer.** | Reads scale by adding instances from a checkpoint, but tip-following RPC grows with them too. | A leader that indexes, and read replicas fed by a changefeed. |
 | **A schema or decoder change means a rebuild.** | An old store is refused rather than misread. Rebuilding costs one backfill. | Deliberately not migrated. |

@@ -44,6 +44,7 @@ type Metrics struct {
 	MulticallSlots      prometheus.Counter
 	BalanceCoalesced    prometheus.Counter
 	BalanceDegraded     prometheus.Counter
+	BalanceReadsShed    prometheus.Counter
 
 	// API
 	HTTPRequests   *prometheus.CounterVec   // route, status
@@ -119,6 +120,7 @@ func NewMetrics() *Metrics {
 		MulticallSlots:      counter("td_multicall_slots_total", "Individual contract calls packed into those batches."),
 		BalanceCoalesced:    counter("td_balance_coalesced_total", "Balance refreshes that shared an in-flight read with another request."),
 		BalanceDegraded:     counter("td_balance_degraded_total", "Tokens a live read could not refresh, served stale or unavailable instead."),
+		BalanceReadsShed:    counter("td_balance_reads_shed_total", "Balance and metadata reads skipped because the maximum were already in progress."),
 
 		HTTPRequests:   counterVec("td_http_requests_total", "HTTP requests by route and status.", "route", "status"),
 		HTTPDuration:   histVec("td_http_duration_seconds", "HTTP request latency by route.", httpBuckets, "route"),
