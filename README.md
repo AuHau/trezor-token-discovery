@@ -52,9 +52,6 @@ make                     # fmt, vet, test, build
 behind the tip reports **not ready** and is taken out of rotation rather than
 answering with a stale head.
 
-```sh
-```
-
 `backfill` must complete before `serve` will start. Serving a half-indexed store
 would return confidently wrong *empty* token lists — the one failure mode that
 genuinely misleads a user — so it is made impossible rather than described in
@@ -148,8 +145,8 @@ Four things in that response are deliberate:
   client.
 
 A balance carries a `status`, because there are three honest answers and not
-two: `ok` is provably current (the cache entry is clean, so no transfer has
-touched the pair since it was read), `stale` is a real value a later transfer
+two: `ok` is current (no transfer has touched the pair since it was read, and it
+was read within the last day), `stale` is a real value a later transfer
 invalidated, and `unavailable` means no value — never a zero standing in for
 one. See [Balances](#balances) for how each one comes about.
 
@@ -168,7 +165,10 @@ a typo with a perfectly valid empty token list:
 Every response carries an `ETag` and honours `If-None-Match`, which is a
 *bandwidth* saving rather than an RPC one — the RPC saving is the cache's job —
 and `td_http_bytes_saved_by_304_total` is there to show which of the two
-actually happened.
+actually happened. On discovery routes it is a weak validator that leaves out the
+heights: the head moves every 12 seconds, so hashing the whole body would mean a
+client polling once a minute never gets a 304. The current head still travels in
+`X-Block-Number` and `X-Block-Hash`, including on the 304.
 
 ## ERC-721
 
@@ -247,7 +247,7 @@ three places:
 | Cache says | What happens | Cost |
 |---|---|---|
 | clean | served as-is, `ok` | none, however often it is polled |
-| dirty or missing | read live, written back, `ok` | its slot in one multicall |
+| dirty, missing, or a day old | read live, written back, `ok` | its slot in one multicall |
 | read failed | the old value as `stale`, or `unavailable` if there is none | bounded by the budget |
 
 The reads are one `eth_call` to Multicall3's `aggregate3` per 300 tokens,
@@ -260,6 +260,10 @@ the saving would not pay for a second port method.
 
 The cases that shaped the design:
 
+- **A clean entry expires after a day.** Rebasing tokens such as stETH change every
+  holder's balance with no `Transfer`, so invalidation alone would leave `ok` on a
+  wrong value forever. Re-reading past 7,200 blocks bounds that error at one extra
+  read per active account per day, with no list of which tokens rebase.
 - **The block is reported, not assumed.** The batch leads with Multicall3's
   `getBlockNumber()`, so `balance.block` is what the EVM says it ran at. If the
   node has lost the pinned state, the read retries at `latest`; a result below
@@ -395,10 +399,10 @@ re-scanning the range.
 **A cached balance expires on an event, not a clock.** Each entry carries the
 block it was read at; every transfer stamps the pair with its block. The merge
 operator reports dirty only when the stamp is *ahead* of the read, so a clean
-entry is not "fresh for 30 seconds" — it is provably still correct and can be
-served forever without an RPC call. Resolving by block number rather than write
-order is also what stops a late-landing in-flight read from clearing an
-invalidation that still applies.
+entry is not "fresh for 30 seconds": no transfer has touched it, so it costs no
+RPC however often it is read. Resolving by block number rather than write order
+is also what stops a late-landing in-flight read from clearing an invalidation
+that still applies.
 
 A reorg takes the opposite treatment per table: per-block digests and pending
 ERC-721 transfers above the common ancestor are dropped and the balance cache is
@@ -431,6 +435,7 @@ internal/chains/evm/  generic EVM adapter (shared by every EVM network), Multica
 internal/store/       Pebble index: keyspace, merge operators, NFT ownership, checkpoints
 internal/indexer/     backfill, tip follower, reorg handling, readiness
 tools/measure/        phase-1 measurement tool
+tools/loadtest/       5,000 users polling once a minute, reporting RPC per request
 testdata/             captured mainnet logs + hand-written edge cases
 docs/                 architecture notes, measurements, assignment
 ```
@@ -439,8 +444,23 @@ The interfaces in `internal/core/ports` are the seam the assignment asks for:
 adding an EVM network is a config block, and adding a non-EVM network is a new
 `ChainAdapter` implementation with storage and API untouched.
 
+## Technology choices
+
+| | Why | Rejected |
+|---|---|---|
+| **Go** | The work is I/O-bound fan-out and streaming millions of logs: goroutines, low memory, one static binary. | — |
+| **Pebble** | Embedded, so a read never crosses a network and there is no shared database to bottleneck. Sorted keys make `account → tokens` one seek, an LSM suits the write-heavy backfill, merge operators keep that path read-free, and hardlinked checkpoints make cloning a store cheap. | BoltDB is too slow under write load. Badger is viable, but its checkpointing is weaker. |
+| **No Postgres, no Redis** | The index and balance cache share one local store, so invalidation is a local write in the same atomic batch, not a distributed-cache problem. There is nothing to deploy alongside. | Shared state is what you would add for a leader/replica split, and nothing below that needs it. |
+| **Multicall3** | The largest saving on the read path: N `balanceOf` in one `eth_call`, on the same address on most EVM chains. | Per-token calls, or JSON-RPC batches, which providers bill per call. |
+| **REST** | The contract is tiny, and ETag/304 is a real lever for clients polling once a minute. | GraphQL gives that up for flexibility nobody here needs. |
+| **Stdlib where it reaches** | `encoding/json` measured at 243 MB/s, so it is not the bottleneck. `encoding/binary` for the store, `log/slog` for logs, a few dozen lines for retries. Dependencies are `pebble`, `chi`, `prometheus/client_golang`, `x/time/rate`, `x/sync/singleflight`, `x/crypto/sha3`. | `go-ethereum`: the service needs keccak and a small ABI subset, not a client library. |
+
 ## Documentation
 
+- [`docs/limits.md`](docs/limits.md) — what this does not do, and what happens at each edge
+- [`docs/rpc-budget.md`](docs/rpc-budget.md) — what the service costs, against the naive design, and the load test
 - [`docs/measurements.md`](docs/measurements.md) — phase-1 numbers and how to reproduce them
-- [`docs/architecture.md`](docs/architecture.md) — design notes and open questions (expanded in phase 10)
+- [`docs/architecture.md`](docs/architecture.md) — design notes, what became of them, and whether a bad index can spread
+- [`docs/openapi.yaml`](docs/openapi.yaml) — the API contract
+- [`docs/presentation.md`](docs/presentation.md) — the key decisions, as a talk outline
 - [`docs/assignment.md`](docs/assignment.md) — the original task

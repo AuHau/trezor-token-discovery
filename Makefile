@@ -1,7 +1,7 @@
 BIN := bin/tokendiscovery
 PKG := ./cmd/tokendiscovery
 
-.PHONY: all build test test-race test-integration golden fuzz lint fmt vet tidy clean measure measure-curve run-serve run-backfill-demo
+.PHONY: all build test test-race test-integration golden fuzz lint fmt vet tidy clean measure measure-curve loadtest run-serve run-backfill-demo clean clean-data
 
 all: fmt vet test build
 
@@ -46,6 +46,11 @@ measure:
 measure-curve:
 	go run ./tools/measure -curve 12000 -curve-chunk 300
 
+# 5,000 users polling once a minute, against a running `serve`. Requires RPC_URL
+# to harvest real accounts; see docs/rpc-budget.md for the measured results.
+loadtest:
+	go run ./tools/loadtest -users 5000 -duration 5m
+
 run-serve: build
 	$(BIN) serve
 
@@ -54,5 +59,10 @@ run-serve: build
 run-backfill-demo: build
 	$(BIN) backfill -from-block 26290000
 
+# Keeps ./data: the full-span store takes over an hour of paid RPC to rebuild.
 clean:
-	rm -rf bin data
+	rm -rf bin
+
+# Deletes the index. Rebuilding it means re-running the backfill.
+clean-data:
+	rm -rf data

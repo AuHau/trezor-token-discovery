@@ -1,0 +1,263 @@
+openapi: 3.1.0
+info:
+  title: Token Discovery Service
+  version: "1"
+  description: >
+    ERC-20 and ERC-721 discovery over plain JSON-RPC. Reference documentation; the
+    DTOs in internal/api are hand-written, and this file is not generated from them.
+servers:
+  - url: http://localhost:8080
+  - url: http://localhost:8081
+paths:
+  /v1/chains:
+    get:
+      summary: Configured networks
+      responses:
+        "200":
+          description: The chains this instance serves.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  chains:
+                    type: array
+                    items: { $ref: "#/components/schemas/Chain" }
+  /v1/status:
+    get:
+      summary: What this instance has indexed
+      responses:
+        "200":
+          description: Index position per chain.
+  /v1/chains/{chain}/accounts/{address}/tokens:
+    get:
+      summary: ERC-20 discovery
+      description: >
+        Costs no RPC unless balances=true, and then only for entries the cache cannot
+        prove current. RPC failures degrade per token and never fail the request.
+      parameters:
+        - $ref: "#/components/parameters/chain"
+        - $ref: "#/components/parameters/address"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+        - name: balances
+          in: query
+          description: Include the current balance per token.
+          schema: { type: boolean, default: false }
+        - $ref: "#/components/parameters/includeZero"
+        - $ref: "#/components/parameters/ifNoneMatch"
+      responses:
+        "200":
+          description: One page of tokens.
+          headers: &discoveryHeaders
+            ETag:
+              description: Weak validator that ignores heights, so a moving head alone still yields 304.
+              schema: { type: string }
+            X-Block-Number:
+              description: The current indexed head, also on a 304.
+              schema: { type: string }
+            X-Block-Hash:
+              description: Its hash, also on a 304.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokensPage" }
+        "304":
+          description: Nothing a client acts on has changed.
+          headers: *discoveryHeaders
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /v1/chains/{chain}/accounts/{address}/nfts:
+    get:
+      summary: ERC-721 discovery
+      description: >
+        ownedCount is live and knownTokenIds comes from indexed transfers, so the two can
+        legitimately disagree. Only counts=true can cost RPC.
+      parameters:
+        - $ref: "#/components/parameters/chain"
+        - $ref: "#/components/parameters/address"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/cursor"
+        - name: counts
+          in: query
+          description: Include the live owned count per collection.
+          schema: { type: boolean, default: false }
+        - name: token_ids
+          in: query
+          description: Include known token IDs, at most 100 per collection.
+          schema: { type: boolean, default: false }
+        - $ref: "#/components/parameters/includeZero"
+        - $ref: "#/components/parameters/ifNoneMatch"
+      responses:
+        "200":
+          description: One page of collections.
+          headers: *discoveryHeaders
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NFTsPage" }
+        "304":
+          description: Nothing a client acts on has changed.
+          headers: *discoveryHeaders
+        "400": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /healthz:
+    get:
+      summary: Liveness
+      responses:
+        "200": { description: The process is running. }
+  /readyz:
+    get:
+      summary: Readiness, backed by the indexer's position
+      responses:
+        "200": { description: Caught up and serving. }
+        "503": { description: Behind the tip, or the provider has stopped answering. }
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      responses:
+        "200": { description: Metrics in text format. }
+components:
+  parameters:
+    chain:
+      name: chain
+      in: path
+      required: true
+      schema: { type: string, example: ethereum }
+    address:
+      name: address
+      in: path
+      required: true
+      description: Any case. Mixed case must pass its EIP-55 checksum.
+      schema: { type: string }
+    limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+    cursor:
+      name: cursor
+      in: query
+      description: The nextCursor from the previous page.
+      schema: { type: string }
+    includeZero:
+      name: include_zero
+      in: query
+      description: Keep rows that provably read zero. A stale zero is always kept.
+      schema: { type: boolean, default: false }
+    ifNoneMatch:
+      name: If-None-Match
+      in: header
+      schema: { type: string }
+  responses:
+    Problem:
+      description: RFC 9457 problem document with a stable type.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+  schemas:
+    Chain:
+      type: object
+      properties:
+        chain: { type: string }
+        chainId: { type: integer }
+        startBlock: { type: integer }
+        standards: { type: array, items: { type: string } }
+        watermarks: { type: string }
+    Block:
+      type: object
+      description: The height this page is valid for.
+      properties:
+        height: { type: integer }
+        hash: { type: string }
+        safe: { type: integer }
+        finalized: { type: integer }
+        unconfirmed:
+          type: boolean
+          description: The height is above the safe watermark.
+    Freshness:
+      type: object
+      properties:
+        ready: { type: boolean }
+        reason: { type: string }
+        lagBlocks: { type: integer }
+        latestSeenBlock: { type: integer }
+    Status:
+      type: string
+      enum: [ok, stale, unavailable]
+      description: >
+        ok is provably current, stale is a real value that may be out of date, and
+        unavailable has no value. Never a zero standing in for one.
+    Balance:
+      type: object
+      required: [status]
+      properties:
+        raw: { type: string, description: Decimal string in base units. }
+        block: { type: integer, description: The block it was read at. }
+        status: { $ref: "#/components/schemas/Status" }
+        error: { type: string }
+    Token:
+      type: object
+      properties:
+        address: { type: string }
+        standard: { type: string }
+        firstBlock: { type: integer }
+        lastBlock: { type: integer }
+        symbol: { type: string }
+        name: { type: string }
+        decimals: { type: integer }
+        balance: { $ref: "#/components/schemas/Balance" }
+    TokensPage:
+      type: object
+      properties:
+        chain: { type: string }
+        chainId: { type: integer }
+        account: { type: string }
+        standard: { type: string }
+        block: { $ref: "#/components/schemas/Block" }
+        freshness: { $ref: "#/components/schemas/Freshness" }
+        tokens: { type: array, items: { $ref: "#/components/schemas/Token" } }
+        nextCursor: { type: string }
+        omittedZeroBalances: { type: integer }
+    OwnedCount:
+      type: object
+      required: [status]
+      properties:
+        count: { type: string, description: Decimal string. }
+        block: { type: integer }
+        status: { $ref: "#/components/schemas/Status" }
+        error: { type: string }
+    Collection:
+      type: object
+      properties:
+        address: { type: string }
+        firstBlock: { type: integer }
+        lastBlock: { type: integer }
+        symbol: { type: string }
+        name: { type: string }
+        ownedCount: { $ref: "#/components/schemas/OwnedCount" }
+        knownTokenIds:
+          type: array
+          description: Decimal strings. Covers the indexed window up to tokenIdsThroughBlock.
+          items: { type: string }
+        tokenIdsTruncated: { type: boolean }
+    NFTsPage:
+      type: object
+      properties:
+        chain: { type: string }
+        chainId: { type: integer }
+        account: { type: string }
+        block: { $ref: "#/components/schemas/Block" }
+        freshness: { $ref: "#/components/schemas/Freshness" }
+        tokenIdsThroughBlock: { type: integer }
+        collections: { type: array, items: { $ref: "#/components/schemas/Collection" } }
+        nextCursor: { type: string }
+        omittedEmpty: { type: integer }
+    Problem:
+      type: object
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        requestId: { type: string }
