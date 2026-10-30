@@ -86,9 +86,48 @@ type AccountTokenBatch struct {
 	// digest used for cross-run consistency checks.
 	Blocks []BlockDigest
 
+	// NFTTransfers are the ERC-721 ownership changes in the range, in the
+	// order observed. Empty unless ERC-721 indexing is enabled.
+	NFTTransfers []NFTTransfer
+
 	// LogCount is the raw number of Transfer logs seen, for metrics and for
 	// validating density assumptions against docs/measurements.md.
 	LogCount int
+
+	// Skipped counts logs that were decoded but produced no pair: mint and
+	// burn legs against the zero address, and shapes that match neither
+	// standard.
+	Skipped SkipCounts
+}
+
+// SkipCounts explains why logs produced no pairs. Surfaced rather than silently
+// dropped: a sudden rise in Malformed means the provider or the decoder is
+// wrong, and the resulting harm would be a *missing* token — the only failure
+// mode that actually misleads a user.
+type SkipCounts struct {
+	ZeroAddress  int
+	UnknownShape int
+	Malformed    int
+	WrongTopic   int
+	RemovedFlag  int
+	OutsideRange int
+}
+
+// Total is the number of logs that yielded nothing.
+func (s SkipCounts) Total() int {
+	return s.ZeroAddress + s.UnknownShape + s.Malformed + s.WrongTopic + s.RemovedFlag + s.OutsideRange
+}
+
+// NFTTransfer is one ERC-721 ownership change, decoded from the indexed tokenId
+// in topic[3]. Ownership is "last transfer wins", so LogIndex is carried to
+// order transfers within a block — which is also why this view is only ever
+// advanced to the safe watermark, never to an orphan-able head.
+type NFTTransfer struct {
+	Token    Address
+	TokenID  Hash // uint256, kept as raw bytes: token IDs routinely exceed 64 bits
+	To       Address
+	Block    uint64
+	LogIndex uint32
 }
 
 // BlockDigest is the per-block content hash frozen once a block is finalized.

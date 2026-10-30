@@ -1,0 +1,12 @@
+{
+  "block": 26290003,
+  "digest": "0xc3dbc7f985f254cb97eb21947dcc2f90e4ef20f6799d8420daaaf55ab89db5c3",
+  "erc20_pairs": 646,
+  "erc721_pairs": 17,
+  "logs": 535,
+  "malformed": 0,
+  "nft_transfers": 43,
+  "pairs": 663,
+  "unknown_shape": 0,
+  "zero_skipped": 25
+}

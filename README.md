@@ -30,7 +30,7 @@ Built incrementally against the implementation plan.
 | 1 | Measurement | ✅ [`docs/measurements.md`](docs/measurements.md) |
 | 2 | Skeleton: domain, ports, config, logging, metrics, CLI | ✅ |
 | 3 | RPC client: limiter, retry, deadlines, error classification | ✅ |
-| 4 | Log decoder | ⬜ |
+| 4 | Log decoder: shape classification, digests, golden + fuzz tests | ✅ |
 | 5 | Pebble store | ⬜ |
 | 6 | Indexer (backfill + tip follower + reorgs) | ⬜ |
 | 7 | REST API | ⬜ |
@@ -83,7 +83,9 @@ internal/core/
 internal/config/      env-based configuration, with phase-1 measurements as defaults
 internal/obs/         slog + the Prometheus metric set
 internal/api/         router, health, metrics, RFC 9457 errors
+internal/chains/evm/  generic EVM adapter (shared by every EVM network)
 tools/measure/        phase-1 measurement tool
+testdata/             captured mainnet logs + hand-written edge cases
 docs/                 architecture notes, measurements, assignment
 ```
 
