@@ -31,7 +31,7 @@ Built incrementally against the implementation plan.
 | 2 | Skeleton: domain, ports, config, logging, metrics, CLI | ✅ |
 | 3 | RPC client: limiter, retry, deadlines, error classification | ✅ |
 | 4 | Log decoder: shape classification, digests, golden + fuzz tests | ✅ |
-| 5 | Pebble store | ⬜ |
+| 5 | Pebble store: keyspace, merge-based writes, checkpoints | ✅ |
 | 6 | Indexer (backfill + tip follower + reorgs) | ⬜ |
 | 7 | REST API | ⬜ |
 | 8 | Balances (Multicall3) | ⬜ |
@@ -54,9 +54,16 @@ genuinely misleads a user — so it is made impossible rather than described in
 the API.
 
 ```sh
-./bin/tokendiscovery backfill       # seed the store (phase 6)
-./bin/tokendiscovery serve          # follow the tip and answer queries
+./bin/tokendiscovery backfill                # seed the store (phase 6)
+./bin/tokendiscovery serve                   # follow the tip and answer queries
+./bin/tokendiscovery checkpoint -out ./snap  # clone the store for a new replica
 ```
+
+That gate is still a warning rather than a refusal, because `backfill` lands in
+phase 6 and an unsatisfiable gate would only make the health and metrics
+endpoints unreachable. `checkpoint` takes the store's directory lock, so it
+needs the service stopped; doing it from a live instance is an admin endpoint
+that lands with the API.
 
 ## Measured, not assumed
 
@@ -73,6 +80,41 @@ mainnet (2026-10-29, full detail in [`docs/measurements.md`](docs/measurements.m
 | Full 50-day backfill | ~1.8k calls, ~9 GB gzipped, **~25 min** |
 | Concurrency | **flat** (238 blocks/s at 1 worker, 278 at 16) — so the backfill is a sequential loop |
 
+## The store
+
+[`internal/store`](internal/store) is the durable index, on embedded Pebble.
+Three decisions carry it:
+
+**One key answers the question.** Pairs are stored as
+`p <chain> <account> <token> <standard>`, so discovery is a bounded prefix scan
+over one account with **zero RPC calls**, and the page cursor is just a token
+address — key order *is* page order, so pagination needs no snapshot pinning.
+
+**The write path never reads.** Pair ranges and balance invalidations are
+Pebble *merge* operands, not read-modify-writes: `FirstBlock` is a running min,
+`LastBlock` a running max. A backfill of ~30–50M pairs stays a sequential write
+stream, and because min/max are commutative and idempotent, replaying a batch
+is a no-op — which is what makes a crash mid-backfill recoverable by simply
+re-scanning the range.
+
+**A cached balance expires on an event, not a clock.** Each entry carries the
+block it was read at; every transfer stamps the pair with its block. The merge
+operator reports dirty only when the stamp is *ahead* of the read, so a clean
+entry is not "fresh for 30 seconds" — it is provably still correct and can be
+served forever without an RPC call. Resolving by block number rather than write
+order is also what stops a late-landing in-flight read from clearing an
+invalidation that still applies.
+
+A reorg takes the opposite treatment per table: per-block digests above the
+common ancestor are dropped and the balance cache is flushed wholesale (every
+cached value is a claim about a height), while account-token pairs are kept —
+re-scanning re-adds the canonical ones, and an orphaned pair is at worst an
+extra token whose live balance reads zero.
+
+`checkpoint` is the scale-out story: Pebble hardlinks the sstables, so cloning a
+multi-GB store costs no extra disk up front and a new replica starts warm
+instead of paying for its own backfill.
+
 ## Layout
 
 ```
@@ -84,6 +126,7 @@ internal/config/      env-based configuration, with phase-1 measurements as defa
 internal/obs/         slog + the Prometheus metric set
 internal/api/         router, health, metrics, RFC 9457 errors
 internal/chains/evm/  generic EVM adapter (shared by every EVM network)
+internal/store/       Pebble index: keyspace, merge operators, checkpoints
 tools/measure/        phase-1 measurement tool
 testdata/             captured mainnet logs + hand-written edge cases
 docs/                 architecture notes, measurements, assignment

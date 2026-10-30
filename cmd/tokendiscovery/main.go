@@ -21,9 +21,11 @@ import (
 	"os/signal"
 	"runtime/debug"
 	"syscall"
+	"time"
 
 	"tokendiscovery/internal/config"
 	"tokendiscovery/internal/obs"
+	"tokendiscovery/internal/store"
 )
 
 // errNotImplemented marks a subcommand whose implementation lands in a later
@@ -174,8 +176,40 @@ func cmdCheckpoint(ctx context.Context, args []string, cfg config.Config, log *s
 	if *out == "" {
 		return errors.New("checkpoint: -out is required")
 	}
-	_, _, _ = ctx, cfg, log
 	_ = m
-	// Phase 5, with the store.
-	return fmt.Errorf("checkpoint: %w (phase 5)", errNotImplemented)
+
+	// Pebble locks the store directory, so this needs the service stopped. That
+	// is the honest limitation of a CLI subcommand: taking a checkpoint from a
+	// *running* instance — the interesting case, since the point is to clone a
+	// warm store onto a new replica — is an admin endpoint, and it lands with
+	// the API rather than here.
+	st, err := store.Open(cfg.DataDir, store.Options{Logger: log})
+	if err != nil {
+		return fmt.Errorf("checkpoint: %w", err)
+	}
+	defer st.Close()
+
+	cursor, err := st.Cursor(ctx, cfg.Chain.ChainID)
+	if err != nil {
+		return fmt.Errorf("checkpoint: %w", err)
+	}
+	if !cursor.Seeded() {
+		// A checkpoint of an unseeded store would seed a replica with an empty
+		// index, which serves confidently wrong empty token lists.
+		return errors.New("checkpoint: store has never been seeded; run backfill first")
+	}
+
+	start := time.Now()
+	if err := st.Checkpoint(ctx, *out); err != nil {
+		return fmt.Errorf("checkpoint: %w", err)
+	}
+	log.Info("checkpoint written",
+		"out", *out,
+		"head_block", cursor.HeadBlock,
+		"seeded_from_block", cursor.SeededFromBlock,
+		"parser_version", cursor.ParserVersion,
+		"store_bytes", st.DiskUsage(),
+		"took", time.Since(start),
+	)
+	return st.Close()
 }
