@@ -181,8 +181,8 @@ type CachedBalance struct {
 
 	// DirtyAtBlock is non-zero when the indexer has seen a transfer touching
 	// this pair since the value was read. A clean entry is not "fresh for 30
-	// seconds" — it is provably still correct, so it can be served forever
-	// without an RPC call.
+	// seconds": no transfer has touched it, so it needs no RPC call however
+	// often it is read.
 	DirtyAtBlock uint64
 }
 

@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 
@@ -338,7 +339,23 @@ func (d Deps) handleAccountTokens(w http.ResponseWriter, r *http.Request) {
 		resp.Tokens = append(resp.Tokens, entry)
 	}
 
-	d.writeCacheable(w, r, resp)
+	d.writeDiscovery(w, r, resp, resp.validator(), resp.Block)
+}
+
+// validator is the page without what moves on its own: the heights, and the
+// lag. Readiness stays, because "not caught up" must not revalidate as unchanged.
+func (t tokensResponse) validator() tokensResponse {
+	t.Block = blockInfo{}
+	t.Freshness = freshnessInfo{Ready: t.Freshness.Ready}
+	t.Tokens = slices.Clone(t.Tokens)
+	for i, entry := range t.Tokens {
+		if entry.Balance != nil {
+			b := *entry.Balance
+			b.Block = 0
+			t.Tokens[i].Balance = &b
+		}
+	}
+	return t
 }
 
 // parseLimit rejects what it cannot understand instead of substituting a

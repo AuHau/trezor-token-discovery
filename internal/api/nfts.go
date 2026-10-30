@@ -3,6 +3,7 @@ package api
 import (
 	"math/big"
 	"net/http"
+	"slices"
 
 	"tokendiscovery/internal/core/domain"
 	"tokendiscovery/internal/core/ports"
@@ -133,5 +134,22 @@ func (d Deps) handleAccountNFTs(w http.ResponseWriter, r *http.Request) {
 		resp.Collections = append(resp.Collections, entry)
 	}
 
-	d.writeCacheable(w, r, resp)
+	d.writeDiscovery(w, r, resp, resp.validator(), resp.Block)
+}
+
+// validator is the page without what moves on its own. See
+// tokensResponse.validator.
+func (n nftsResponse) validator() nftsResponse {
+	n.Block = blockInfo{}
+	n.Freshness = freshnessInfo{Ready: n.Freshness.Ready}
+	n.TokenIDsThroughBlock = 0
+	n.Collections = slices.Clone(n.Collections)
+	for i, entry := range n.Collections {
+		if entry.OwnedCount != nil {
+			c := *entry.OwnedCount
+			c.Block = 0
+			n.Collections[i].OwnedCount = &c
+		}
+	}
+	return n
 }

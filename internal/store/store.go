@@ -436,9 +436,8 @@ func (s *Store) AccountTokens(ctx context.Context, q ports.AccountTokensQuery) (
 //
 // Entries the indexer has marked dirty are returned too, with DirtyAtBlock set.
 // That is deliberate: a degraded read path can serve a stale value with an
-// honest flag, which beats failing the request. A clean entry is not "fresh for
-// N seconds" — it is provably still correct, because the only thing that can
-// change a balance is a transfer, and a transfer stamps the pair.
+// honest flag, which beats failing the request. A clean entry is one no transfer
+// has touched since it was read. Age is the caller's concern: see balances.Live.
 func (s *Store) CachedBalances(ctx context.Context, chainID uint64, account domain.Address, tokens []domain.Address) (map[domain.Address]ports.CachedBalance, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

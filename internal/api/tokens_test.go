@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -442,7 +443,7 @@ func TestAccountTokensETag(t *testing.T) {
 	if etag == "" {
 		t.Fatal("no ETag on a cacheable response")
 	}
-	if cc := first.Header().Get("Cache-Control"); cc != "no-cache" {
+	if cc := first.Header().Get("Cache-Control"); !strings.Contains(cc, "no-cache") {
 		t.Errorf("Cache-Control = %q; a page is only valid for the block it names", cc)
 	}
 
@@ -461,8 +462,8 @@ func TestAccountTokensETag(t *testing.T) {
 	if rec := h.get(t, path, [2]string{"If-None-Match", "*"}); rec.Code != http.StatusNotModified {
 		t.Errorf("If-None-Match: * = %d, want 304", rec.Code)
 	}
-	if rec := h.get(t, path, [2]string{"If-None-Match", "W/" + etag}); rec.Code != http.StatusNotModified {
-		t.Errorf("weak validator = %d, want 304", rec.Code)
+	if rec := h.get(t, path, [2]string{"If-None-Match", strings.TrimPrefix(etag, "W/")}); rec.Code != http.StatusNotModified {
+		t.Errorf("strong form of the validator = %d, want 304", rec.Code)
 	}
 	if rec := h.get(t, path, [2]string{"If-None-Match", `"stale"`}); rec.Code != http.StatusOK {
 		t.Errorf("non-matching validator = %d, want 200", rec.Code)
@@ -971,5 +972,106 @@ func TestAccountNFTsZeroCountsAndBadInput(t *testing.T) {
 		if rec := h.get(t, nftsPath(account)+q); rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: status %d, want 400", q, rec.Code)
 		}
+	}
+}
+
+func TestDiscoveryETagIgnoresTheHead(t *testing.T) {
+	// A client polling once a minute always finds a newer head, so a validator
+	// that included it could never produce a 304.
+	h := newHarness(t, nil)
+	h.seed(t, pair(10, domain.StandardERC20, 1, 2))
+	path := tokensPath(addr(1).Checksum())
+
+	first := h.get(t, path)
+	etag := first.Header().Get("ETag")
+	if !strings.HasPrefix(etag, `W/"`) {
+		t.Fatalf("ETag = %s, want a weak validator: the bodies differ, the meaning does not", etag)
+	}
+	if got := first.Header().Get("Cache-Control"); !strings.Contains(got, "private") {
+		t.Errorf("Cache-Control = %q: per-account data must not sit in a shared cache", got)
+	}
+
+	// Only the head moves.
+	h.seedAt(t, headBlock+50)
+
+	second := h.get(t, path, [2]string{"If-None-Match", etag})
+	if second.Code != http.StatusNotModified {
+		t.Fatalf("after the head alone moved: status %d, want 304", second.Code)
+	}
+	// The 304 still says how current it is.
+	if got := second.Header().Get("X-Block-Number"); got != strconv.FormatUint(headBlock+50, 10) {
+		t.Errorf("X-Block-Number on a 304 = %q, want the current head", got)
+	}
+	if second.Header().Get("X-Block-Hash") == "" {
+		t.Error("no X-Block-Hash on a 304")
+	}
+}
+
+func TestDiscoveryETagFollowsWhatAClientActsOn(t *testing.T) {
+	account := addr(1)
+	token := addr(10)
+	ctx := context.Background()
+	path := tokensPath(account.Checksum()) + "?balances=true"
+
+	h := newHarness(t, nil)
+	h.seed(t, pair(10, domain.StandardERC20, 1, 2))
+	put := func(raw int64, block uint64) {
+		t.Helper()
+		if err := h.store.PutBalances(ctx, testChainID, account, []domain.Balance{{Token: token, Raw: big.NewInt(raw), Block: block}}); err != nil {
+			t.Fatalf("PutBalances: %v", err)
+		}
+	}
+	put(5, headBlock)
+	base := h.get(t, path).Header().Get("ETag")
+
+	changed := func(step string) {
+		t.Helper()
+		rec := h.get(t, path, [2]string{"If-None-Match", base})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d, want 200 with a new validator", step, rec.Code)
+		}
+		base = rec.Header().Get("ETag")
+	}
+
+	// A later balance read at the same value: only the read height moved.
+	h.seedAt(t, headBlock+1)
+	put(5, headBlock+1)
+	if rec := h.get(t, path, [2]string{"If-None-Match", base}); rec.Code != http.StatusNotModified {
+		t.Errorf("a re-read of the same value: status %d, want 304", rec.Code)
+	}
+
+	// A transfer: the range moves and the value is no longer trusted.
+	h.seedAt(t, headBlock+2, pair(10, domain.StandardERC20, 1, headBlock+2))
+	changed("a transfer")
+
+	// The value is refreshed.
+	put(9, headBlock+2)
+	changed("a new balance")
+
+	// Metadata resolves.
+	if err := h.store.PutTokenMeta(ctx, testChainID, []domain.TokenMeta{{Token: token, Symbol: "NEW", Resolved: true}}); err != nil {
+		t.Fatalf("PutTokenMeta: %v", err)
+	}
+	changed("resolved metadata")
+
+	// A new token.
+	h.seedAt(t, headBlock+3, pair(20, domain.StandardERC20, headBlock+3, headBlock+3))
+	changed("a new token")
+}
+
+func TestNFTETagIgnoresTheViewHeight(t *testing.T) {
+	h := newHarness(t, nil)
+	h.seed(t, pair(20, domain.StandardERC721, 1, 2))
+	path := nftsPath(addr(1).Checksum()) + "?token_ids=true"
+	etag := h.get(t, path).Header().Get("ETag")
+
+	h.seedNFTs(t, headBlock+1, headBlock+1)
+	if rec := h.get(t, path, [2]string{"If-None-Match", etag}); rec.Code != http.StatusNotModified {
+		t.Errorf("only the view height moved: status %d, want 304", rec.Code)
+	}
+
+	h.seedNFTs(t, headBlock+2, headBlock+2, mintTo(20, big.NewInt(7), headBlock+2, 0))
+	if rec := h.get(t, path, [2]string{"If-None-Match", etag}); rec.Code != http.StatusOK {
+		t.Errorf("a new known token ID: status %d, want 200", rec.Code)
 	}
 }

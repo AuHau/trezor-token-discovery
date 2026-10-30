@@ -6,12 +6,14 @@
 // all. Collapsing those into "balance or zero" is what would let the service
 // report a confident zero for an account that simply has not been read yet.
 //
-// The cache is authoritative when it is clean. That is not a staleness window
-// but a proof: the only thing that can change an ERC-20 balance is a transfer,
-// every transfer stamps the pair in the store, and a stamp marks the entry
-// dirty. So a clean entry can be served forever with no RPC call — which is
-// what keeps steady-state RPC tracking on-chain activity rather than request
-// rate.
+// The cache is authoritative when it is clean, because a transfer is what changes
+// a balance, every transfer stamps the pair in the store, and a stamp marks the
+// entry dirty. So a clean entry can be served with no RPC call, which is what
+// keeps steady-state RPC tracking on-chain activity rather than request rate.
+//
+// The exception is a token whose balances change without a Transfer, such as
+// stETH. Live re-reads clean entries past an age limit, which bounds that error
+// without having to know which tokens do it.
 package balances
 
 import (
@@ -27,8 +29,8 @@ import (
 type Status string
 
 const (
-	// StatusOK is a value that is provably current: it was read at or after
-	// the last transfer touching the pair.
+	// StatusOK is a value read at or after the last transfer touching the pair,
+	// within the age limit.
 	StatusOK Status = "ok"
 
 	// StatusStale is a real value that a later transfer has invalidated. It is

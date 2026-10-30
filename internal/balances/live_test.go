@@ -408,3 +408,45 @@ func TestLiveStoreFailureIsAnError(t *testing.T) {
 		t.Fatal("expected the store error")
 	}
 }
+
+func TestLiveRereadsAnOldCleanEntry(t *testing.T) {
+	// stETH changes every holder's balance with no Transfer, so nothing would
+	// ever mark this entry dirty. Without an age limit it reads ok forever.
+	token := addr(1)
+	store := &recordingStore{fakeStore: fakeStore{cached: map[domain.Address]ports.CachedBalance{
+		token: {Balance: domain.Balance{Token: token, Raw: big.NewInt(100), Block: liveHead}},
+	}}}
+	chain := &fakeChain{}
+	l, _ := newLive(t, store, chain, time.Second)
+	resolve := func(atBlock uint64) Resolved {
+		t.Helper()
+		got, err := l.Resolve(context.Background(), liveChain, addr(9), []domain.Address{token}, atBlock)
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		return got[token]
+	}
+
+	if b := resolve(liveHead + defaultMaxAgeBlocks - 1); b.Status != StatusOK || b.Raw.Int64() != 100 {
+		t.Errorf("inside the limit = %+v", b)
+	}
+	if n := chain.reads.Load(); n != 0 {
+		t.Errorf("%d reads inside the limit, want 0", n)
+	}
+
+	at := liveHead + defaultMaxAgeBlocks
+	if b := resolve(at); b.Status != StatusOK || b.Raw.Int64() != 42 || b.Block != at {
+		t.Errorf("at the limit = %+v, want the re-read value", b)
+	}
+	if n := chain.reads.Load(); n != 1 {
+		t.Errorf("%d reads at the limit, want 1", n)
+	}
+
+	// If the re-read fails, the old value is still served, but no longer as ok.
+	chain.read = func(_ context.Context, tokens []domain.TokenRef) ([]domain.Balance, error) {
+		return []domain.Balance{{Token: token, Err: "balance could not be read"}}, errors.New("provider down")
+	}
+	if b := resolve(at); b.Status != StatusStale || b.Raw.Int64() != 100 || b.Err == "" {
+		t.Errorf("failed re-read = %+v, want the old value marked stale", b)
+	}
+}

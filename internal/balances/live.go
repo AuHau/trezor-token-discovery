@@ -29,6 +29,13 @@ const (
 	// broken spam token would cost an eth_call on every poll, indefinitely.
 	revertedRetry = 10 * time.Minute
 
+	// defaultMaxAgeBlocks is how old a clean entry may get before it is read
+	// again, about a day on Ethereum. Rebasing tokens such as stETH change every
+	// holder's balance with no Transfer, so no stamp ever marks them dirty. This
+	// bounds that error for one extra read per active account per day, instead
+	// of keeping a list of which tokens rebase.
+	defaultMaxAgeBlocks = 7200
+
 	// maxRemembered bounds the memory a flood of broken contracts can claim.
 	maxRemembered = 1 << 16
 )
@@ -47,9 +54,11 @@ type Chains interface {
 // LiveOptions configures a Live resolver.
 type LiveOptions struct {
 	// Budget bounds chain reads per request. Zero selects the default.
-	Budget  time.Duration
-	Logger  *slog.Logger
-	Metrics *obs.Metrics
+	Budget time.Duration
+	// MaxAgeBlocks is how old a clean entry may get. Zero selects the default.
+	MaxAgeBlocks uint64
+	Logger       *slog.Logger
+	Metrics      *obs.Metrics
 }
 
 // Live resolves balances from the cache and fills what the cache cannot prove
@@ -63,6 +72,7 @@ type Live struct {
 	store  LiveStore
 	chains Chains
 	budget time.Duration
+	maxAge uint64
 	log    *slog.Logger
 	m      *obs.Metrics
 
@@ -101,6 +111,9 @@ func NewLive(store LiveStore, chains Chains, o LiveOptions) (*Live, error) {
 	if o.Budget <= 0 {
 		o.Budget = defaultBudget
 	}
+	if o.MaxAgeBlocks == 0 {
+		o.MaxAgeBlocks = defaultMaxAgeBlocks
+	}
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.DiscardHandler)
 	}
@@ -109,6 +122,7 @@ func NewLive(store LiveStore, chains Chains, o LiveOptions) (*Live, error) {
 		store:    store,
 		chains:   chains,
 		budget:   o.Budget,
+		maxAge:   o.MaxAgeBlocks,
 		log:      o.Logger,
 		m:        o.Metrics,
 		now:      time.Now,
@@ -125,8 +139,13 @@ func (l *Live) Resolve(ctx context.Context, chainID uint64, account domain.Addre
 
 	var refs []domain.TokenRef
 	for _, token := range tokens {
-		if out[token].Status == StatusOK {
-			continue
+		if entry := out[token]; entry.Status == StatusOK {
+			if atBlock < entry.Block+l.maxAge {
+				continue
+			}
+			// Too old to vouch for. If the re-read fails, this is what it is.
+			entry.Status = StatusStale
+			out[token] = entry
 		}
 		if reason, ok := l.recentlyReverted(revertKey{chainID, account, token}); ok {
 			entry := out[token]
