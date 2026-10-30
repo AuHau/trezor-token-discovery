@@ -20,7 +20,8 @@ how, and why.
 
 ## Balances
 
-- `ok`, `stale`, `unavailable`
+- Cached
+- Status `ok`, `stale`, `unavailable`
 - Invalidation of specific token balance by event: the indexer already sees every transfer.
 - Rejected: deriving balances from transfer amounts.
 - TTL for rebasing tokens

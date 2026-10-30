@@ -20,6 +20,30 @@ indexer and without burning paid RPC credits. It runs on Ethereum mainnet and Li
 
 ## How it works
 
+```
+                 ┌─────────── RPC client ───────────┐
+   provider  ──▶ │ rate limit · retry + backoff ·   │
+                 │ deadlines · error classification │
+                 └───────┬──────────────────┬───────┘
+                         │                  │
+            ┌────────────▼─────┐   ┌────────▼──────────┐
+            │ Indexer          │   │ Balance resolver  │
+            │ backfill + tip   │   │ Multicall3 ·      │
+            │ decode → pairs   │   │ budget · shared   │
+            │                  │   │ in-flight reads   │
+            └────────┬─────────┘   └────────┬──────────┘
+                     │ atomic batch         │ read / write-back
+                 ┌───▼──────────────────────▼────┐
+                 │ Pebble: pairs · balance cache │
+                 │ metadata · digests · cursor · │
+                 │ NFT journal + ownership view  │
+                 └───┬───────────────────────────┘
+                     │
+            ┌────────▼────────┐
+            │ REST API (chi)  │  ETag / 304 · /v1/status · /metrics
+            └─────────────────┘
+```
+
 ERC-20 and ERC-721 transfers are both logs with the same
 `topic0 = keccak256("Transfer(address,address,uint256)")`, with `from` and `to` as
 indexed topics. So **one `eth_getLogs` per block range, filtered only on `topic0`,
