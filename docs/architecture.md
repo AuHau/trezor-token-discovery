@@ -116,8 +116,11 @@ The cases that shaped the design:
   Outages are not remembered this way, so they retry immediately.
 - **A read in flight during a reorg is not cached.** It may have run on the
   dropped branch, and the canonical transfer replacing it can be stamped at or
-  below its block, so it would look clean forever. Reads above the index head
-  are served but never written, and that check is atomic against the flush.
+  below its block, so it would look clean for up to a day. Heights cannot catch
+  this, since re-indexing soon carries the head back past the read's block, so
+  each flush bumps a generation and a read from an earlier one is served but
+  never written, atomically against the flush. It is also not shared with a
+  request that arrives after the flush.
 - **The budget bounds the wait, not the read.** A request waits 800 ms; past
   that, the response goes out with whatever the cache has, while the read carries
   on for up to 15 s and writes back. Ending the read at the budget is what the load

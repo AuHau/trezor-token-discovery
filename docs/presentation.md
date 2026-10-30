@@ -5,19 +5,23 @@ how, and why.
 
 ## Why these technologies (3 min)
 
-Go, embedded Pebble, no Postgres or Redis, Multicall3, REST. The argument to make:
-the index and the cache share one store, so invalidation is a local write in the same
-atomic batch as the data, not a distributed-cache problem.
+- Go, embedded Pebble, no Postgres or Redis, Multicall3, REST. 
+- The index and the cache share one store, so invalidation is a local write-in the same  atomic batch as the data, not a distributed-cache problem.
 
-## Scale-out
+### Scale-out
 
-Checkpointing for fresh instances
+ - Checkpointing for fresh instances scale out
+ - Currently, requires stopping the server, but could be done on maintenance API level for live checkpointing
 
-## Balances: three honest answers (5 min)
+## Tokens
 
-- `ok`, `stale`, `unavailable`, and never a zero standing in for "don't know".
-- Invalidation by event: the indexer already sees every transfer.
-- Show a poll going from cold to warm: `/metrics` and the demo below.
+- Indexed from start block
+- Using `topic0 = keccak256("Transfer(address,address,uint256)")` log topic filter
+
+## Balances
+
+- `ok`, `stale`, `unavailable`
+- Invalidation of specific token balance by event: the indexer already sees every transfer.
 - Rejected: deriving balances from transfer amounts.
 - TTL for rebasing tokens
 
@@ -30,10 +34,13 @@ that matters: **discovery keeps answering when the provider is gone.**
 ## 6. Reorgs (3 min)
 
 - Reorgs detected by per-block parent-hash check, rewound to the common ancestor and re-indexed.
-- Potentially dropped tokens are stored in 
+- Potentially dropped tokens are stored, but eventually filtered out by "ignore balance-zero tokens"
+- Watermarks - different strategies (consensus, immediate, block-count)
+- Erase balance cache
 
+## 7. Performance (4 min)
 
-## 7. Proof (4 min)
+ETag & 304 -> for efficient polling without changes
 
 The load test table from [rpc-budget](rpc-budget.md): 5,000 users at 83 requests/s,
 0 failures, p95 37.5 ms. Read two separate numbers: 0.073 `eth_call` per request (the
@@ -52,10 +59,8 @@ Worth showing, because the assignment says the process is what counts:
 
 ## 9. Limits, and what comes next (2 min)
 
-Be direct: [limits](limits.md). The window, one provider, `checkpoint` needing a stop.
-Next: a provider pool, which also makes a lagging node detectable. Then a second network:
-Linea, because Suite can already sign for it and it would test the watermark strategy
-for real.
+The window, one provider, `checkpoint` needing a stop.
+Next: a provider pool, which also makes a lagging node detectable. 
 
 ## Demo
 

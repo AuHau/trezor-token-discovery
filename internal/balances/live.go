@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -221,15 +222,20 @@ func (l *Live) Resolve(ctx context.Context, chainID uint64, account domain.Addre
 		return out, nil
 	}
 
+	// Taken before the read, so a reorg at any point after this keeps the result
+	// out of the cache. It is in the flight key so that a request arriving after
+	// that reorg cannot join a read from before it.
+	generation := l.store.BalanceGeneration()
+
 	// The read is shared and paid for, so it must not die with whichever request
 	// happened to start it, or with its budget: finishing it is what fills the
 	// cache for the next poll. Each caller only stops waiting.
-	ch := l.flight.DoChan(flightKey("b", chainID, account, atBlock, refs), func() (any, error) {
+	ch := l.flight.DoChan(flightKey("b"+strconv.FormatUint(generation, 10), chainID, account, atBlock, refs), func() (any, error) {
 		if !l.acquireRead() {
 			return nil, nil
 		}
 		defer l.releaseRead()
-		return l.read(reader, chainID, account, refs, atBlock), nil
+		return l.read(reader, chainID, account, generation, refs, atBlock), nil
 	})
 	budget := time.NewTimer(l.budget)
 	defer budget.Stop()
@@ -274,7 +280,7 @@ func (l *Live) degraded(n int) {
 }
 
 // read performs one chain read and writes the results back.
-func (l *Live) read(reader ports.BalanceReader, chainID uint64, account domain.Address, refs []domain.TokenRef, atBlock uint64) []domain.Balance {
+func (l *Live) read(reader ports.BalanceReader, chainID uint64, account domain.Address, generation uint64, refs []domain.TokenRef, atBlock uint64) []domain.Balance {
 	ctx, cancel := context.WithTimeout(l.base, readTimeout)
 	defer cancel()
 
@@ -299,7 +305,7 @@ func (l *Live) read(reader ports.BalanceReader, chainID uint64, account domain.A
 	l.degraded(degraded)
 	// Not with the read's timeout: a read that came back just inside it has
 	// already been paid for, so it should not be thrown away.
-	if err := l.store.PutBalances(l.base, chainID, account, good); err != nil {
+	if err := l.store.PutBalances(l.base, chainID, account, generation, good); err != nil {
 		l.log.Warn("balance write-back failed", "account", account.Checksum(), "error", err)
 	}
 	return fresh

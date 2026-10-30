@@ -40,7 +40,8 @@ would take. Numbers come from [measurements](measurements.md) and the
 | Limit | What happens |
 |---|---|
 | **A reorg can leave an extra token.** | Pairs are not deleted on a rewind, so a token seen only on an orphaned branch stays listed. With balances it reads zero and is filtered. Its `unconfirmed` flag clears once `safe` passes its `firstBlock`, so the flag says a token can no longer be reorged out, not that it survived. |
-| **Any reorg flushes the balance cache.** | Simple and correct, at the cost of one round of re-reads. |
+| **Any reorg flushes the balance cache.** | Simple and correct, at the cost of one round of re-reads. A response already being built can still carry a value from the dropped branch; the next poll re-reads it. |
+| **`balance.unconfirmed` can overstate the risk.** | `lastBlock` is not rolled back by a reorg, so a transfer that was dropped keeps the flag on until `safe` passes that block. It never understates a transfer the index has seen. |
 | **A reorg deeper than the 128-header window is fatal,** as is one below the ownership view. | The service stops instead of indexing an unverified branch or reporting owners from a dead one. On mainnet this means a lying provider or broken finality, and the store has to be rebuilt. |
 | **A real finality stall** falls back to a 12-block depth. | Serving continues, but the ownership view's guarantee is only as good as that depth until finality returns. The threshold is per chain: 256 blocks on Ethereum, 21,600 on Linea, where finality normally trails by ~4 h. |
 | **On Linea, `unconfirmed` lasts hours.** | Linea's `safe` equals `finalized` (proven on L1), so `unconfirmed` is true for any token first seen after the last proof. That is accurate, but it means something different from Ethereum's ~6 minutes. The ERC-721 ownership view trails by the same ~4 h. |

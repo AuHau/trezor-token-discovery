@@ -149,8 +149,14 @@ type Store interface {
 	// serve them with an honest staleness flag rather than failing.
 	CachedBalances(ctx context.Context, chainID uint64, account domain.Address, tokens []domain.Address) (map[domain.Address]CachedBalance, error)
 
-	// PutBalances stores freshly read balances.
-	PutBalances(ctx context.Context, chainID uint64, account domain.Address, balances []domain.Balance) error
+	// BalanceGeneration identifies the current contents of the balance cache,
+	// which change wholesale on a Rewind. Take it before reading a balance.
+	BalanceGeneration() uint64
+
+	// PutBalances stores freshly read balances, unless the cache has been
+	// flushed since generation was taken: such a read may be from a dropped
+	// branch.
+	PutBalances(ctx context.Context, chainID uint64, account domain.Address, generation uint64, balances []domain.Balance) error
 
 	// TokenMeta reads cached metadata; absent tokens are simply missing from the
 	// result rather than erroring.

@@ -57,15 +57,21 @@ func (f *fakeChain) Metadata(ctx context.Context, tokens []domain.TokenRef) ([]d
 // recordingStore keeps what is written so a test can assert the write-back.
 type recordingStore struct {
 	fakeStore
-	mu   sync.Mutex
-	puts []domain.Balance
-	meta []domain.TokenMeta
+	generation atomic.Uint64
+
+	mu      sync.Mutex
+	puts    []domain.Balance
+	putGens []uint64
+	meta    []domain.TokenMeta
 }
 
-func (r *recordingStore) PutBalances(_ context.Context, _ uint64, _ domain.Address, b []domain.Balance) error {
+func (r *recordingStore) BalanceGeneration() uint64 { return r.generation.Load() }
+
+func (r *recordingStore) PutBalances(_ context.Context, _ uint64, _ domain.Address, generation uint64, b []domain.Balance) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.puts = append(r.puts, b...)
+	r.putGens = append(r.putGens, generation)
 	return nil
 }
 
@@ -280,6 +286,69 @@ func TestLiveRememberedRevertsAreBounded(t *testing.T) {
 	}
 	if n := len(l.reverted); n > maxRemembered {
 		t.Errorf("remembered %d entries, want at most %d", n, maxRemembered)
+	}
+}
+
+func TestLiveTakesTheGenerationBeforeReading(t *testing.T) {
+	// A reorg during the read has to keep its result out of the cache, which
+	// only works if the write-back carries the generation from before it.
+	token := addr(1)
+	store := &recordingStore{}
+	chain := &fakeChain{}
+	chain.read = func(_ context.Context, tokens []domain.TokenRef) ([]domain.Balance, error) {
+		store.generation.Add(1)
+		return []domain.Balance{{Token: tokens[0].Address, Raw: big.NewInt(99), Block: liveHead}}, nil
+	}
+	l, _ := newLive(t, store, chain, time.Second)
+
+	if _, err := l.Resolve(context.Background(), liveChain, addr(9), []domain.Address{token}, liveHead); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.putGens) != 1 || store.putGens[0] != 0 {
+		t.Errorf("write-back generations = %v, want the one from before the read", store.putGens)
+	}
+}
+
+func TestLiveDoesNotShareAReadAcrossARewind(t *testing.T) {
+	// A request arriving after a reorg must not be answered by a read from
+	// before it, even though it asks for the same tokens at the same height.
+	token := addr(1)
+	store := &recordingStore{}
+	started, release := make(chan struct{}), make(chan struct{})
+	chain := &fakeChain{}
+	chain.read = func(_ context.Context, tokens []domain.TokenRef) ([]domain.Balance, error) {
+		value := int64(7)
+		if chain.reads.Load() == 1 {
+			close(started)
+			<-release
+			value = 99
+		}
+		return []domain.Balance{{Token: tokens[0].Address, Raw: big.NewInt(value), Block: liveHead}}, nil
+	}
+	l, _ := newLive(t, store, chain, 5*time.Second)
+	tokens := []domain.Address{token}
+
+	before := make(chan struct{})
+	go func() {
+		defer close(before)
+		if _, err := l.Resolve(context.Background(), liveChain, addr(9), tokens, liveHead); err != nil {
+			t.Errorf("Resolve: %v", err)
+		}
+	}()
+	<-started
+
+	store.generation.Add(1)
+
+	got, err := l.Resolve(context.Background(), liveChain, addr(9), tokens, liveHead)
+	close(release)
+	<-before
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if chain.reads.Load() != 2 || got[token].Raw == nil || got[token].Raw.Int64() != 7 {
+		t.Errorf("%d reads, got %+v; want a second read answering 7", chain.reads.Load(), got[token])
 	}
 }
 

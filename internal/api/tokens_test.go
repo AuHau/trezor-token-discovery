@@ -444,7 +444,7 @@ func TestAccountTokensBalances(t *testing.T) {
 	// A uint256 that does not fit in a float64, which is why the wire format
 	// is a decimal string.
 	huge, _ := new(big.Int).SetString("115792089237316195423570985008687907853269984665640564039457584007913129639935", 10)
-	err := h.store.PutBalances(ctx, testChainID, addr(1), []domain.Balance{
+	err := h.store.PutBalances(ctx, testChainID, addr(1), h.store.BalanceGeneration(), []domain.Balance{
 		{Token: addr(10), Raw: huge, Block: headBlock},
 		{Token: addr(20), Raw: big.NewInt(500), Block: headBlock},
 		{Token: addr(30), Raw: big.NewInt(0), Block: headBlock},
@@ -762,6 +762,9 @@ type liveChain struct {
 	values    map[domain.Address]*big.Int
 	meta      map[domain.Address]domain.TokenMeta
 	down      bool
+
+	// afterRead runs once the values are read, before the read returns.
+	afterRead func()
 }
 
 func (c *liveChain) Balances(_ context.Context, _ domain.Address, tokens []domain.TokenRef, atBlock uint64) ([]domain.Balance, error) {
@@ -777,6 +780,9 @@ func (c *liveChain) Balances(_ context.Context, _ domain.Address, tokens []domai
 	}
 	if c.down {
 		return out, errors.New("provider down")
+	}
+	if c.afterRead != nil {
+		c.afterRead()
 	}
 	return out, nil
 }
@@ -894,6 +900,110 @@ func TestLiveBalancesEndToEnd(t *testing.T) {
 	}
 }
 
+func TestBalanceUnconfirmedFollowsLastBlock(t *testing.T) {
+	const erc20Settled, erc20Moving, nftSettled, nftMoving = 10, 11, 20, 21
+	h := newHarness(t, nil)
+	h.seed(t,
+		pair(erc20Settled, domain.StandardERC20, 1, safeBlock),
+		pair(erc20Moving, domain.StandardERC20, 1, safeBlock+1),
+		pair(nftSettled, domain.StandardERC721, 1, safeBlock),
+		pair(nftMoving, domain.StandardERC721, 1, safeBlock+1),
+	)
+	values := make([]domain.Balance, 0, 4)
+	for _, token := range []uint64{erc20Settled, erc20Moving, nftSettled, nftMoving} {
+		values = append(values, domain.Balance{Token: addr(token), Raw: big.NewInt(5), Block: headBlock})
+	}
+	if err := h.store.PutBalances(context.Background(), testChainID, addr(1), h.store.BalanceGeneration(), values); err != nil {
+		t.Fatalf("PutBalances: %v", err)
+	}
+	account := addr(1).Checksum()
+
+	tokens := decodeTokens(t, h.get(t, tokensPath(account)+"?balances=true")).Tokens
+	if len(tokens) != 2 {
+		t.Fatalf("got %d tokens, want 2", len(tokens))
+	}
+	// Both were read at the same height above safe. Only the one with a transfer
+	// up there is provisional, and both stay ok: the two questions are separate.
+	if b := tokens[0].Balance; b == nil || b.Status != "ok" || b.Unconfirmed {
+		t.Errorf("settled balance = %+v, want ok and confirmed", b)
+	}
+	if b := tokens[1].Balance; b == nil || b.Status != "ok" || !b.Unconfirmed {
+		t.Errorf("moving balance = %+v, want ok and unconfirmed", b)
+	}
+	// The token itself is in no doubt either way.
+	if tokens[1].Unconfirmed {
+		t.Errorf("token = %+v: a later transfer does not put its listing in doubt", tokens[1])
+	}
+
+	nfts := decodeNFTs(t, h.get(t, nftsPath(account)+"?counts=true")).Collections
+	if len(nfts) != 2 {
+		t.Fatalf("got %d collections, want 2", len(nfts))
+	}
+	if c := nfts[0].OwnedCount; c == nil || c.Unconfirmed {
+		t.Errorf("settled count = %+v, want confirmed", c)
+	}
+	if c := nfts[1].OwnedCount; c == nil || !c.Unconfirmed {
+		t.Errorf("moving count = %+v, want unconfirmed", c)
+	}
+}
+
+func TestDiscoveryETagChangesWhenABalanceConfirms(t *testing.T) {
+	h := newHarness(t, nil)
+	h.seed(t, pair(10, domain.StandardERC20, 1, headBlock))
+	err := h.store.PutBalances(context.Background(), testChainID, addr(1), h.store.BalanceGeneration(),
+		[]domain.Balance{{Token: addr(10), Raw: big.NewInt(5), Block: headBlock}})
+	if err != nil {
+		t.Fatalf("PutBalances: %v", err)
+	}
+	path := tokensPath(addr(1).Checksum()) + "?balances=true"
+
+	first := h.get(t, path)
+	if !decodeTokens(t, first).Tokens[0].Balance.Unconfirmed {
+		t.Fatal("a balance with a transfer above safe is reported as confirmed")
+	}
+
+	// The watermark passes the transfer. Nothing else on the page changes.
+	h.seedNFTs(t, headBlock+1, safeBlock)
+
+	second := h.get(t, path, [2]string{"If-None-Match", first.Header().Get("ETag")})
+	if second.Code != http.StatusOK {
+		t.Fatalf("after the balance confirmed: status %d, want 200 with a new validator", second.Code)
+	}
+	if decodeTokens(t, second).Tokens[0].Balance.Unconfirmed {
+		t.Error("still unconfirmed once the watermark passed the transfer")
+	}
+}
+
+func TestReadFromADroppedBranchIsNotCached(t *testing.T) {
+	// The whole race, through the real store and resolver: the read executes on
+	// a branch, the reorg is handled and re-indexed back to the same height, and
+	// only then does the read land. Its block passes any height check, and the
+	// transfer stamp is at that same block, so it would look clean for a day.
+	token := addr(10)
+	chain := &liveChain{values: map[domain.Address]*big.Int{token: big.NewInt(99)}, meta: map[domain.Address]domain.TokenMeta{}}
+	h := newLiveHarness(t, chain)
+	h.seed(t, pair(10, domain.StandardERC20, 1, headBlock))
+	chain.afterRead = func() {
+		chain.afterRead = nil
+		if err := h.store.Rewind(context.Background(), testChainID, headBlock-1); err != nil {
+			t.Errorf("Rewind: %v", err)
+		}
+		chain.values[token] = big.NewInt(7)
+		h.seedAt(t, headBlock, pair(10, domain.StandardERC20, 1, headBlock))
+	}
+	path := tokensPath(addr(1).Checksum()) + "?balances=true"
+
+	decodeTokens(t, h.get(t, path))
+
+	resp := decodeTokens(t, h.get(t, path))
+	if chain.reads != 2 {
+		t.Errorf("%d reads, want the second request to read again", chain.reads)
+	}
+	if b := resp.Tokens[0].Balance; b == nil || b.Raw != "7" || b.Status != "ok" {
+		t.Errorf("balance = %+v, want the canonical 7", b)
+	}
+}
+
 func TestStaleZeroIsNotHidden(t *testing.T) {
 	// A zero that a later transfer invalidated is the exact state of an account
 	// that has just received this token. With the provider down, dropping it as
@@ -902,7 +1012,7 @@ func TestStaleZeroIsNotHidden(t *testing.T) {
 	chain := &liveChain{down: true, values: map[domain.Address]*big.Int{}}
 	h := newLiveHarness(t, chain)
 	h.seed(t, pair(10, domain.StandardERC20, 1, headBlock))
-	err := h.store.PutBalances(context.Background(), testChainID, addr(1), []domain.Balance{
+	err := h.store.PutBalances(context.Background(), testChainID, addr(1), h.store.BalanceGeneration(), []domain.Balance{
 		{Token: token, Raw: big.NewInt(0), Block: headBlock},
 	})
 	if err != nil {
@@ -1090,7 +1200,7 @@ func TestDiscoveryETagFollowsWhatAClientActsOn(t *testing.T) {
 	h.seed(t, pair(10, domain.StandardERC20, 1, 2))
 	put := func(raw int64, block uint64) {
 		t.Helper()
-		if err := h.store.PutBalances(ctx, testChainID, account, []domain.Balance{{Token: token, Raw: big.NewInt(raw), Block: block}}); err != nil {
+		if err := h.store.PutBalances(ctx, testChainID, account, h.store.BalanceGeneration(), []domain.Balance{{Token: token, Raw: big.NewInt(raw), Block: block}}); err != nil {
 			t.Fatalf("PutBalances: %v", err)
 		}
 	}

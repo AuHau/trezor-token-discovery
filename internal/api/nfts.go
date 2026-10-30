@@ -73,6 +73,9 @@ type ownedCount struct {
 	Block  uint64 `json:"block,omitempty"`
 	Status string `json:"status"`
 	Error  string `json:"error,omitempty"`
+
+	// Unconfirmed is as for balanceEntry.
+	Unconfirmed bool `json:"unconfirmed"`
 }
 
 // handleAccountNFTs serves ERC-721 discovery.
@@ -125,7 +128,7 @@ func (d Deps) handleAccountNFTs(w http.ResponseWriter, r *http.Request) {
 				resp.OmittedEmpty++
 				continue
 			}
-			entry.OwnedCount = &ownedCount{Block: b.Block, Status: string(b.Status), Error: b.Err}
+			entry.OwnedCount = &ownedCount{Block: b.Block, Status: string(b.Status), Error: b.Err, Unconfirmed: x.balanceUnconfirmed(p)}
 			if b.OK() {
 				entry.OwnedCount.Count = b.Raw.String()
 			}

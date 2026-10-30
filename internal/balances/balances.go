@@ -61,7 +61,8 @@ type Reader interface {
 // Store is the slice of ports.Store this package reads and writes.
 type Store interface {
 	CachedBalances(ctx context.Context, chainID uint64, account domain.Address, tokens []domain.Address) (map[domain.Address]ports.CachedBalance, error)
-	PutBalances(ctx context.Context, chainID uint64, account domain.Address, balances []domain.Balance) error
+	BalanceGeneration() uint64
+	PutBalances(ctx context.Context, chainID uint64, account domain.Address, generation uint64, balances []domain.Balance) error
 }
 
 // Cached resolves balances from the store alone, with no chain access.

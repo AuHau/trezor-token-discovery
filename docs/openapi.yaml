@@ -193,6 +193,9 @@ components:
         block: { type: integer, description: The block it was read at. }
         status: { $ref: "#/components/schemas/Status" }
         error: { type: string }
+        unconfirmed:
+          type: boolean
+          description: The token's lastBlock is above the safe watermark, so a transfer behind this balance could still be reorged out.
     Token:
       type: object
       properties:
@@ -227,6 +230,9 @@ components:
         block: { type: integer }
         status: { $ref: "#/components/schemas/Status" }
         error: { type: string }
+        unconfirmed:
+          type: boolean
+          description: The collection's lastBlock is above the safe watermark, so a transfer behind this count could still be reorged out.
     Collection:
       type: object
       properties:

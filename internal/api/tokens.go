@@ -100,6 +100,11 @@ type balanceEntry struct {
 	Block  uint64 `json:"block,omitempty"`
 	Status string `json:"status"`
 	Error  string `json:"error,omitempty"`
+
+	// Unconfirmed is true when the token's LastBlock is above the safe
+	// watermark, so a transfer behind this balance could still be reorged out.
+	// Status does not cover this: an ok balance can be current and provisional.
+	Unconfirmed bool `json:"unconfirmed"`
 }
 
 // discovery is one validated page of the index, with whatever the request asked
@@ -279,6 +284,17 @@ func (x *discovery) unconfirmed(p domain.AccountToken) bool {
 	return p.FirstBlock > x.cursor.SafeBlock
 }
 
+// balanceUnconfirmed reports whether a transfer behind a pair's balance could
+// still be reorged out.
+//
+// It goes by LastBlock rather than the block the balance was read at: a first
+// read of a long-quiet token happens at the head, but nothing a reorg could undo
+// went into it. LastBlock is not rolled back by a reorg, so it can overstate the
+// risk until the watermark passes it, never understate it.
+func (x *discovery) balanceUnconfirmed(p domain.AccountToken) bool {
+	return p.LastBlock > x.cursor.SafeBlock
+}
+
 func (x *discovery) nextCursor() string {
 	if x.page.Next == nil {
 		return ""
@@ -337,9 +353,10 @@ func (d Deps) handleAccountTokens(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			entry.Balance = &balanceEntry{
-				Block:  b.Block,
-				Status: string(b.Status),
-				Error:  b.Err,
+				Block:       b.Block,
+				Status:      string(b.Status),
+				Error:       b.Err,
+				Unconfirmed: x.balanceUnconfirmed(p),
 			}
 			if b.OK() {
 				entry.Balance.Raw = b.Raw.String()

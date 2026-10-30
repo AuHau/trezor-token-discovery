@@ -447,7 +447,7 @@ func TestBalanceCacheLifecycle(t *testing.T) {
 		} else if c.HeadBlock < block {
 			apply(t, s, block)
 		}
-		err := s.PutBalances(ctx, testChain, account, []domain.Balance{
+		err := s.PutBalances(ctx, testChain, account, s.BalanceGeneration(), []domain.Balance{
 			{Token: token, Raw: big.NewInt(raw), Block: block},
 		})
 		if err != nil {
@@ -501,7 +501,7 @@ func TestPutBalancesSkipsFailedReads(t *testing.T) {
 	ctx := context.Background()
 	account := addr(1)
 
-	err := s.PutBalances(ctx, testChain, account, []domain.Balance{
+	err := s.PutBalances(ctx, testChain, account, s.BalanceGeneration(), []domain.Balance{
 		{Token: addr(10), Err: "execution reverted"},
 		{Token: addr(20), Raw: big.NewInt(3), Block: 700},
 	})
@@ -535,7 +535,7 @@ func TestPutBalancesSkipsReadsAboveTheHead(t *testing.T) {
 	}
 
 	orphan := []domain.Balance{{Token: token, Raw: big.NewInt(99), Block: 602}}
-	if err := s.PutBalances(ctx, testChain, account, orphan); err != nil {
+	if err := s.PutBalances(ctx, testChain, account, s.BalanceGeneration(), orphan); err != nil {
 		t.Fatalf("PutBalances: %v", err)
 	}
 	apply(t, s, 602, pair(1, 10, domain.StandardERC20, 602, 602))
@@ -550,7 +550,7 @@ func TestPutBalancesSkipsReadsAboveTheHead(t *testing.T) {
 
 	// At the head is the normal case, and is kept.
 	canonical := []domain.Balance{{Token: token, Raw: big.NewInt(7), Block: 602}}
-	if err := s.PutBalances(ctx, testChain, account, canonical); err != nil {
+	if err := s.PutBalances(ctx, testChain, account, s.BalanceGeneration(), canonical); err != nil {
 		t.Fatalf("PutBalances: %v", err)
 	}
 	got, err = s.CachedBalances(ctx, testChain, account, []domain.Address{token})
@@ -559,6 +559,47 @@ func TestPutBalancesSkipsReadsAboveTheHead(t *testing.T) {
 	}
 	if c, ok := got[token]; !ok || c.Dirty() || c.Balance.Raw.Int64() != 7 {
 		t.Fatalf("read at the head = %+v, ok %v; want clean 7", c, ok)
+	}
+}
+
+func TestPutBalancesDropsReadsFromBeforeARewind(t *testing.T) {
+	// The head check alone misses this: by the time the read lands, re-indexing
+	// has carried the head back past its block.
+	s := newStore(t)
+	ctx := context.Background()
+	account, token := addr(1), addr(10)
+
+	apply(t, s, 602, pair(1, 10, domain.StandardERC20, 602, 602))
+	before := s.BalanceGeneration()
+
+	if err := s.Rewind(ctx, testChain, 600); err != nil {
+		t.Fatalf("Rewind: %v", err)
+	}
+	apply(t, s, 602, pair(1, 10, domain.StandardERC20, 602, 602))
+
+	orphan := []domain.Balance{{Token: token, Raw: big.NewInt(99), Block: 602}}
+	if err := s.PutBalances(ctx, testChain, account, before, orphan); err != nil {
+		t.Fatalf("PutBalances: %v", err)
+	}
+	got, err := s.CachedBalances(ctx, testChain, account, []domain.Address{token})
+	if err != nil {
+		t.Fatalf("CachedBalances: %v", err)
+	}
+	if c, ok := got[token]; ok {
+		t.Fatalf("a read from before the rewind was cached: %+v", c)
+	}
+
+	// A read taken after the rewind is the normal case, and is kept.
+	canonical := []domain.Balance{{Token: token, Raw: big.NewInt(7), Block: 602}}
+	if err := s.PutBalances(ctx, testChain, account, s.BalanceGeneration(), canonical); err != nil {
+		t.Fatalf("PutBalances: %v", err)
+	}
+	got, err = s.CachedBalances(ctx, testChain, account, []domain.Address{token})
+	if err != nil {
+		t.Fatalf("CachedBalances: %v", err)
+	}
+	if c, ok := got[token]; !ok || c.Dirty() || c.Balance.Raw.Int64() != 7 {
+		t.Fatalf("read after the rewind = %+v, ok %v; want clean 7", c, ok)
 	}
 }
 
@@ -578,7 +619,7 @@ func TestRewind(t *testing.T) {
 	if err := s.ApplyBatch(ctx, testChain, batch, cursorAt(602)); err != nil {
 		t.Fatalf("ApplyBatch: %v", err)
 	}
-	if err := s.PutBalances(ctx, testChain, account, []domain.Balance{{Token: token, Raw: big.NewInt(5), Block: 602}}); err != nil {
+	if err := s.PutBalances(ctx, testChain, account, s.BalanceGeneration(), []domain.Balance{{Token: token, Raw: big.NewInt(5), Block: 602}}); err != nil {
 		t.Fatalf("PutBalances: %v", err)
 	}
 
@@ -917,7 +958,7 @@ func TestConcurrentReadersAndWriter(t *testing.T) {
 				for _, tok := range tokens {
 					balances = append(balances, domain.Balance{Token: tok, Raw: big.NewInt(int64(n)), Block: 650})
 				}
-				if err := s.PutBalances(ctx, testChain, account, balances); err != nil {
+				if err := s.PutBalances(ctx, testChain, account, s.BalanceGeneration(), balances); err != nil {
 					t.Errorf("PutBalances: %v", err)
 					return
 				}

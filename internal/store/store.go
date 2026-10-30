@@ -69,6 +69,10 @@ type Store struct {
 	// rewindMu orders balance writes against the flush a reorg performs. See
 	// PutBalances.
 	rewindMu sync.RWMutex
+	// generation counts those flushes, guarded by rewindMu. It is shared across
+	// chains and kept in memory: a read does not outlive the process, and the
+	// worst a rewind on another chain does is cost one read its write-back.
+	generation uint64
 
 	db       *pebble.DB
 	log      *slog.Logger
@@ -321,6 +325,7 @@ func (s *Store) Rewind(ctx context.Context, chainID uint64, toBlock uint64) erro
 	if err := b.Commit(pebble.Sync); err != nil {
 		return fmt.Errorf("rewind: commit: %w", err)
 	}
+	s.generation++
 	return nil
 }
 
@@ -473,6 +478,14 @@ func (s *Store) CachedBalances(ctx context.Context, chainID uint64, account doma
 	return out, nil
 }
 
+// BalanceGeneration identifies the current contents of the balance cache. Take
+// it before reading a balance from the chain, and hand it to PutBalances.
+func (s *Store) BalanceGeneration() uint64 {
+	s.rewindMu.RLock()
+	defer s.rewindMu.RUnlock()
+	return s.generation
+}
+
 // PutBalances stores freshly read balances.
 //
 // Failed reads are skipped rather than cached: a revert or a timeout says
@@ -480,22 +493,31 @@ func (s *Store) CachedBalances(ctx context.Context, chainID uint64, account doma
 // ever recover. The write is a merge, not a set, so a concurrent invalidation
 // at a higher block survives it — see balanceMerger.
 //
-// A read above the index head is skipped too, and that rule is what makes a
-// reorg safe. A read in flight when Rewind runs may have executed on the branch
-// being dropped; landing after the flush, it would look clean, because the
-// canonical transfers that replace it can be stamped at or below its block and
-// so never mark it dirty. Every such read is above the rewound head, and
-// rewindMu makes the check and the commit atomic against the flush.
+// generation is what makes a reorg safe. A read in flight when Rewind runs may
+// have executed on the branch being dropped; landing after the flush, it would
+// look clean, because the canonical transfers that replace it can be stamped at
+// or below its block and so never mark it dirty. Comparing heights cannot catch
+// this, since re-indexing soon carries the head back past the read's block. So
+// the caller takes BalanceGeneration before it reads, and a write from before
+// the latest flush is dropped. rewindMu makes the check and the commit atomic
+// against the flush.
+//
+// A read above the index head is skipped too. No transfer up there has been
+// stamped yet, so the value cannot be proven clean.
 //
 // The commit is not synced. The balance cache is derived state: losing it to a
 // machine crash costs one round of re-reads, which is not worth an fsync on a
 // path that runs per request.
-func (s *Store) PutBalances(ctx context.Context, chainID uint64, account domain.Address, balances []domain.Balance) error {
+func (s *Store) PutBalances(ctx context.Context, chainID uint64, account domain.Address, generation uint64, balances []domain.Balance) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	s.rewindMu.RLock()
 	defer s.rewindMu.RUnlock()
+
+	if generation != s.generation {
+		return nil
+	}
 
 	cursor, err := s.cursor(chainID)
 	if err != nil {

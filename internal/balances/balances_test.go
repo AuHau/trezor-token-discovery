@@ -30,7 +30,9 @@ func (f *fakeStore) CachedBalances(_ context.Context, _ uint64, _ domain.Address
 	return out, nil
 }
 
-func (f *fakeStore) PutBalances(context.Context, uint64, domain.Address, []domain.Balance) error {
+func (f *fakeStore) BalanceGeneration() uint64 { return 0 }
+
+func (f *fakeStore) PutBalances(context.Context, uint64, domain.Address, uint64, []domain.Balance) error {
 	return nil
 }
 

@@ -186,6 +186,10 @@ Reading the response:
 - **`freshness`** is in every response, because "this account holds no tokens" and
   "this instance is 500 blocks behind" must never look the same.
 - **`balance.raw`** is a decimal string, because a uint256 does not fit in a float64.
+- **`balance.unconfirmed`** means the token's `lastBlock` is above the safe watermark, so
+  a transfer behind the value could still be reorged out. It is separate from `status`:
+  an `ok` balance can be current and still provisional. `ownedCount.unconfirmed` is the
+  same for a collection.
 
 A balance carries one of three statuses:
 
@@ -210,7 +214,7 @@ curl "localhost:8080/v1/chains/ethereum/accounts/0xDa021A2C1C2F99574D861Ef8c6fA7
   "collections": [
     { "address": "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85",
       "firstBlock": 26303190, "lastBlock": 26304666, "unconfirmed": false,
-      "ownedCount": { "count": "18163", "block": 26304669, "status": "ok" },
+      "ownedCount": { "count": "18163", "block": 26304669, "status": "ok", "unconfirmed": true },
       "knownTokenIds": ["215693765813587502…", "…"],
       "tokenIdsTruncated": true }
   ]
