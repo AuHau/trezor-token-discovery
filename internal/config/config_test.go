@@ -100,15 +100,94 @@ func TestRedactedRPCURL(t *testing.T) {
 
 func TestStallThresholdClearsHealthyFinalityLag(t *testing.T) {
 	// A healthy chain must never trip the fallback, which replaces finality
-	// with a guess. Finalized trails by up to two epochs, and the cached tag
-	// falls further behind for as long as it is cached.
-	const (
-		twoEpochs = 96
-		blockTime = 12 * time.Second
-	)
-	ch := Default().Chain
-	healthy := twoEpochs + uint64(ch.WatermarkPollInterval/blockTime)
-	if ch.FinalityStallBlocks <= healthy {
-		t.Fatalf("stall threshold %d is within healthy lag %d", ch.FinalityStallBlocks, healthy)
+	// with a guess. The healthy lag is the chain's own finality delay plus how
+	// far the cached tag falls behind while it is cached.
+	tests := map[string]struct {
+		finalityLag uint64 // healthy latest-minus-finalized, in blocks
+		blockTime   time.Duration
+	}{
+		// Two epochs.
+		"ethereum": {finalityLag: 96, blockTime: 12 * time.Second},
+		// Measured ~1,700 blocks behind (~4 h) between L1 proofs. Doubled,
+		// because one sample is not a distribution. 2 s is Linea's nominal
+		// block time; the measured ~9 s would make the cache term smaller.
+		"linea": {finalityLag: 2 * 1_720, blockTime: 2 * time.Second},
+	}
+	for _, slug := range Presets() {
+		tc, ok := tests[slug]
+		if !ok {
+			t.Fatalf("preset %q has no healthy finality lag recorded here", slug)
+		}
+		ch, _ := Preset(slug)
+		healthy := tc.finalityLag + uint64(ch.WatermarkPollInterval/tc.blockTime)
+		if ch.FinalityStallBlocks <= healthy {
+			t.Errorf("%s: stall threshold %d is within healthy lag %d", slug, ch.FinalityStallBlocks, healthy)
+		}
+	}
+}
+
+func TestPresetsAreValidAndDistinct(t *testing.T) {
+	slugs := map[string]bool{}
+	ids := map[uint64]bool{}
+	for _, slug := range Presets() {
+		ch, ok := Preset(slug)
+		if !ok {
+			t.Fatalf("Presets lists %q but Preset does not know it", slug)
+		}
+		cfg := Default()
+		cfg.RPCURL = "https://example.invalid/key"
+		cfg.Chain = ch
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("%s: %v", slug, err)
+		}
+		// The registry would reject these anyway, but only at boot.
+		if slugs[ch.Slug] || ids[ch.ChainID] {
+			t.Errorf("%s: duplicate slug or chain id", slug)
+		}
+		slugs[ch.Slug], ids[ch.ChainID] = true, true
+	}
+}
+
+func TestLoadSelectsChain(t *testing.T) {
+	t.Setenv("RPC_URL", "https://example.invalid/key")
+	t.Setenv("CHAIN", "Linea")
+	t.Setenv("CHAIN_LOG_RANGE_BLOCKS", "500")
+
+	cfg, _, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Chain.Slug != "linea" || cfg.Chain.ChainID != 59144 {
+		t.Errorf("chain = %s/%d, want linea/59144", cfg.Chain.Slug, cfg.Chain.ChainID)
+	}
+	// Per-value overrides apply on top of the preset, not underneath it.
+	if cfg.Chain.LogRangeBlocks != 500 {
+		t.Errorf("LogRangeBlocks = %d, want the override 500", cfg.Chain.LogRangeBlocks)
+	}
+	// Selecting a chain must never default into another chain's store.
+	if cfg.DataDir == Default().DataDir {
+		t.Errorf("linea defaulted into the ethereum store %q", cfg.DataDir)
+	}
+}
+
+func TestLoadKeepsExplicitDataDir(t *testing.T) {
+	t.Setenv("RPC_URL", "https://example.invalid/key")
+	t.Setenv("CHAIN", "linea")
+	t.Setenv("DATA_DIR", "/srv/linea")
+
+	cfg, _, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.DataDir != "/srv/linea" {
+		t.Errorf("DataDir = %q, want the explicit /srv/linea", cfg.DataDir)
+	}
+}
+
+func TestLoadRejectsUnknownChain(t *testing.T) {
+	t.Setenv("RPC_URL", "https://example.invalid/key")
+	t.Setenv("CHAIN", "dogechain")
+	if _, _, err := Load(); err == nil {
+		t.Fatal("expected an unknown CHAIN to be reported")
 	}
 }

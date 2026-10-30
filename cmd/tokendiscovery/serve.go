@@ -25,7 +25,7 @@ func cmdServe(ctx context.Context, args []string, cfg config.Config, log *slog.L
 		cfg.HTTPAddr = *addr
 	}
 
-	svc, err := openService(cfg, log, m)
+	svc, err := openService(ctx, cfg, log, m)
 	if err != nil {
 		return err
 	}

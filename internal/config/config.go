@@ -101,14 +101,29 @@ type ChainConfig struct {
 	Standards []domain.Standard
 }
 
+// DefaultChain is the network selected when CHAIN is unset.
+const DefaultChain = "ethereum"
+
 // Default returns the configuration with every non-secret value filled in.
 func Default() Config {
+	ch, _ := Preset(DefaultChain)
 	return Config{
-		DataDir:   "./data",
+		DataDir:   defaultDataDir(DefaultChain),
 		HTTPAddr:  ":8080",
 		LogLevel:  slog.LevelInfo,
 		LogFormat: "text",
-		Chain: ChainConfig{
+		Chain:     ch,
+	}
+}
+
+// Preset returns the built-in configuration for a known network. Every EVM
+// network is served by the same adapter, so a preset is the whole cost of
+// adding one; the values that differ between chains are the ones measured in
+// docs/measurements.md.
+func Preset(slug string) (ChainConfig, bool) {
+	switch strings.ToLower(slug) {
+	case "ethereum":
+		return ChainConfig{
 			Slug:       "ethereum",
 			ChainID:    1,
 			StartBlock: 25_933_634, // from the assignment
@@ -134,8 +149,64 @@ func Default() Config {
 			ConfirmationDepth:   12,
 
 			Standards: []domain.Standard{domain.StandardERC20, domain.StandardERC721},
-		},
+		}, true
+
+	case "linea":
+		// Linea is a zk-rollup with a single sequencer. It publishes the same
+		// block tags as Ethereum, so it uses the same strategy, but `safe` and
+		// `finalized` are both "proven on L1" and trail the head by hours rather
+		// than minutes. That is the one value here that is not a copy of
+		// Ethereum's; see docs/measurements.md.
+		return ChainConfig{
+			Slug:    "linea",
+			ChainID: 59144,
+			// The Linea block with the same timestamp as the assignment's
+			// Ethereum start block, so both chains cover the same window.
+			StartBlock: 31_972_391,
+
+			// Measured: ~1.7 Transfer logs and ~1 KB per block, against ~574 and
+			// ~365 KB on Ethereum. 2,000 blocks is ~2 MB and ~3.4k logs, under
+			// the public endpoint's 10,000-result cap with room for bursts; a
+			// burst past it is halved like any other result-cap error.
+			LogRangeBlocks:        2_000,
+			TipPollInterval:       4 * time.Second,
+			WatermarkPollInterval: 6 * time.Minute,
+			HeaderRingSize:        128,
+
+			MulticallAddress: domain.MustParseAddress(defaultMulticall3), // verified deployed
+			MulticallChunk:   300,
+			BalanceBudget:    800 * time.Millisecond,
+
+			RPCRate:    25,
+			RPCBurst:   50,
+			RPCTimeout: 60 * time.Second,
+
+			Watermarks: domain.WatermarkConsensusTags,
+			// Measured: finalized trails latest by ~1,700 blocks (~4 h) while
+			// healthy. Ethereum's 256 would declare a stall on every poll and
+			// replace L1 finality with a 12-block guess. 21,600 blocks is about
+			// two days at the measured ~9 s block time.
+			FinalityStallBlocks: 21_600,
+			ConfirmationDepth:   12,
+
+			Standards: []domain.Standard{domain.StandardERC20, domain.StandardERC721},
+		}, true
 	}
+	return ChainConfig{}, false
+}
+
+// Presets lists the networks Preset knows, for error messages.
+func Presets() []string { return []string{"ethereum", "linea"} }
+
+// defaultDataDir keeps each network in its own store. Ethereum keeps the
+// original ./data so existing stores stay where they are; every other chain
+// gets a sibling, so selecting a chain can never write into another chain's
+// store by default.
+func defaultDataDir(slug string) string {
+	if slug == DefaultChain {
+		return "./data"
+	}
+	return "./data-" + slug
 }
 
 // Load builds a Config from defaults overlaid with environment variables, then
@@ -151,6 +222,18 @@ func Load() (Config, []string, error) {
 
 	cfg.RPCURL = strings.TrimSpace(os.Getenv("RPC_URL"))
 
+	// CHAIN goes first: it replaces the whole chain block, so the per-value
+	// overrides below apply on top of the selected network.
+	if v, ok := lookup("CHAIN"); ok {
+		ch, known := Preset(v)
+		if !known {
+			fail("CHAIN", fmt.Errorf("unknown chain %q (known: %s)", v, strings.Join(Presets(), ", ")))
+		} else {
+			cfg.Chain = ch
+			cfg.DataDir = defaultDataDir(ch.Slug)
+			note("CHAIN", v)
+		}
+	}
 	if v, ok := lookup("DATA_DIR"); ok {
 		cfg.DataDir = v
 		note("DATA_DIR", v)

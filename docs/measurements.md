@@ -163,3 +163,40 @@ ordered-commit machinery entirely. Revisit only if a provider is found that scal
 - **Revise density figures**: 574 logs/block, ~210M logs, ~30–50M pairs.
 - **Clamp tip requests to the known head** to avoid `-32602`.
 - Confirmed as-is: shape-based classification, stdlib `encoding/json`, low single-digit GB store.
+
+## Second network: Linea
+
+The same tool, pointed at Linea's public endpoint (`https://rpc.linea.build`) on **2026-10-30**,
+tip **32,473,388**. The start block **31,972,391** is the Linea block with the same timestamp as
+Ethereum's 25,933,634, so both chains cover the same ~52-day window: **501,009 blocks**, ~9 s apart on
+average.
+
+```sh
+RPC_URL=https://rpc.linea.build go run ./tools/measure -start-block 31972391 -windows 10 -window-size 1000
+```
+
+| | Ethereum | Linea |
+|---|---|---|
+| Transfer logs per block | 574 | **1.7** |
+| ERC-20 / ERC-721 split | | 99.4% / 0.6% |
+| Unclassified log shapes | 0 | 0 |
+| Decoded JSON per block | ~365 KB | **~1 KB** |
+| `latest − finalized`, healthy | ≤ ~126 blocks (~25 min) | **~1,720 blocks (~3.7 h)** |
+| `safe` | Its own tag, one epoch behind | **Equal to `finalized`** |
+| `eth_getLogs` caps (public endpoint) | 10,000-block range, no result cap (QuickNode) | 10,000-block range **and** 10,000 results (`-32005 query returned more than…`, already classified as `ErrResultTooLarge` and halved) |
+| Multicall3 at `0xcA11…CA11` | yes | yes (`eth_getCode` non-empty) |
+
+What this sets in the `linea` preset (`internal/config`):
+
+- **`LogRangeBlocks = 2000`.** About 2 MB and ~3.4k logs per call, well under the result cap. The
+  whole window is ~250 calls, against ~1,830 on Ethereum.
+- **`FinalityStallBlocks = 21,600`.** Linea finalises when a proof lands on L1, so a ~4 h gap is
+  healthy. Ethereum's 256 would declare a stall on every poll and replace L1 finality with a
+  12-block guess. 21,600 is about two days at the measured block time. The 1,720 figure is a single
+  sample, so treat the threshold as provisional until it has been watched for longer.
+- Everything else, including the watermark strategy, the decoder, the store and the API, is
+  unchanged from Ethereum.
+
+End to end: a 20,001-block `backfill` took **14 s** and ~10 `eth_getLogs` calls (52k logs, 32k
+pairs, 1 MB store). `serve` then answered `/tokens?balances=true` with live Multicall3 balances
+(USDC, USDT, Aave aTokens, EURe) and logged no finality stall.

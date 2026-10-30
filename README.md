@@ -444,6 +444,30 @@ The interfaces in `internal/core/ports` are the seam the assignment asks for:
 adding an EVM network is a config block, and adding a non-EVM network is a new
 `ChainAdapter` implementation with storage and API untouched.
 
+## A second network: Linea
+
+Linea is the network Trezor Suite does not support yet that best tests that
+claim. Suite already signs for any EVM chain ID, so the backend is the only
+missing piece. Linea is EVM, so the adapter, decoder, store and API run
+unchanged. Its finality is the one thing that is genuinely different: as a
+zk-rollup it finalises when a proof lands on L1, about 4 hours behind the head
+rather than about 13 minutes.
+
+```sh
+CHAIN=linea RPC_URL=https://rpc.linea.build ./bin/tokendiscovery backfill   # ~250 requests
+CHAIN=linea RPC_URL=https://rpc.linea.build ./bin/tokendiscovery serve -addr :8081
+curl localhost:8081/v1/chains/linea/accounts/<address>/tokens?balances=true
+```
+
+`CHAIN` selects a preset in `internal/config` and defaults the store to
+`./data-linea`, so it never shares a directory with the Ethereum store in
+`./data`. At startup `eth_chainId` is checked against the preset before the
+store is opened, so pointing a Linea config at an Ethereum endpoint is a startup
+error rather than a mislabelled index. The only value that had to differ from
+Ethereum, apart from the chain itself, is the finality-stall threshold. The
+numbers behind it are in [`docs/measurements.md`](docs/measurements.md#second-network-linea)
+and the consequences are in [`docs/limits.md`](docs/limits.md#chain-and-reorgs).
+
 ## Technology choices
 
 | | Why | Rejected |

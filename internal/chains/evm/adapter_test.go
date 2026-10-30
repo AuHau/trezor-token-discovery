@@ -25,6 +25,8 @@ type fakeCaller struct {
 	headers map[string]any
 	// logs answers eth_getLogs.
 	logs []Log
+	// chainID answers eth_chainId.
+	chainID string
 	// err, when set, fails every call.
 	err error
 }
@@ -57,6 +59,8 @@ func (f *fakeCaller) Call(ctx context.Context, out any, method string, params ..
 		}
 	case "eth_getLogs":
 		result = f.logs
+	case "eth_chainId":
+		result = f.chainID
 	default:
 		return fmt.Errorf("fake: unexpected method %s", method)
 	}
@@ -413,5 +417,27 @@ func TestNewAdapterValidates(t *testing.T) {
 	}
 	if _, err := NewAdapter(nil, Config{Chain: testChainInfo(domain.WatermarkConsensusTags)}); err == nil {
 		t.Error("a nil caller was accepted")
+	}
+}
+
+func TestVerifyChainIDRejectsAnotherNetwork(t *testing.T) {
+	ctx := context.Background()
+	want := testChainInfo(domain.WatermarkConsensusTags).ChainID
+
+	a := newTestAdapter(t, &fakeCaller{chainID: hexUint64(want)}, domain.WatermarkConsensusTags)
+	if err := a.VerifyChainID(ctx); err != nil {
+		t.Fatalf("matching chain id rejected: %v", err)
+	}
+
+	// The case this exists for: an Ethereum endpoint behind a config for
+	// another chain. It must fail, not index Ethereum under the wrong id.
+	a = newTestAdapter(t, &fakeCaller{chainID: hexUint64(want + 1)}, domain.WatermarkConsensusTags)
+	if err := a.VerifyChainID(ctx); err == nil {
+		t.Fatal("expected a chain id mismatch to be an error")
+	}
+
+	a = newTestAdapter(t, &fakeCaller{chainID: "garbage"}, domain.WatermarkConsensusTags)
+	if err := a.VerifyChainID(ctx); err == nil {
+		t.Fatal("expected an unparseable chain id to be an error")
 	}
 }

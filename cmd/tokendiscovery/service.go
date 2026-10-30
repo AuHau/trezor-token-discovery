@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"time"
@@ -30,7 +31,7 @@ type service struct {
 	balances *balances.Live
 }
 
-func openService(cfg config.Config, log *slog.Logger, m *obs.Metrics) (*service, error) {
+func openService(ctx context.Context, cfg config.Config, log *slog.Logger, m *obs.Metrics) (*service, error) {
 	client, err := rpc.New(rpc.Options{
 		URL:     cfg.RPCURL,
 		Rate:    cfg.Chain.RPCRate,
@@ -64,6 +65,12 @@ func openService(cfg config.Config, log *slog.Logger, m *obs.Metrics) (*service,
 		Metrics:               m,
 	})
 	if err != nil {
+		return nil, fmt.Errorf("chain adapter: %w", err)
+	}
+
+	// Before the store is opened, so a mismatched endpoint cannot write a
+	// single key.
+	if err := adapter.VerifyChainID(ctx); err != nil {
 		return nil, fmt.Errorf("chain adapter: %w", err)
 	}
 

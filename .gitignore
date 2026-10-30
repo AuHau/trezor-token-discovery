@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 data/
+data-*/
 bin/
 .idea/
 /measure

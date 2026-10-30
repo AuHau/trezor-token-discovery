@@ -162,7 +162,7 @@ func cmdBackfill(ctx context.Context, args []string, cfg config.Config, log *slo
 		log.Info("start block overridden", "from_block", *fromBlock)
 	}
 
-	svc, err := openService(cfg, log, m)
+	svc, err := openService(ctx, cfg, log, m)
 	if err != nil {
 		return fmt.Errorf("backfill: %w", err)
 	}

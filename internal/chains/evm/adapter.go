@@ -124,6 +124,29 @@ func NewAdapter(client Caller, cfg Config) (*Adapter, error) {
 // Chain describes the network this adapter serves.
 func (a *Adapter) Chain() domain.ChainInfo { return a.cfg.Chain }
 
+// VerifyChainID checks that the endpoint serves the configured network.
+//
+// With more than one network configured, the RPC URL and the chain selection
+// are two settings that can disagree. Nothing downstream would notice: an
+// Ethereum endpoint answers a Linea config's requests happily, and the store
+// would fill with Ethereum pairs keyed under Linea's chain ID. One call at
+// boot makes that a startup error instead of a silently wrong index.
+func (a *Adapter) VerifyChainID(ctx context.Context) error {
+	var raw string
+	if err := a.rpc.Call(ctx, &raw, "eth_chainId"); err != nil {
+		return fmt.Errorf("read chain id: %w", err)
+	}
+	got, err := parseHexUint64(raw)
+	if err != nil {
+		return fmt.Errorf("chain id %q: %w", raw, err)
+	}
+	if got != a.cfg.Chain.ChainID {
+		return fmt.Errorf("RPC endpoint serves chain id %d, but chain %q is configured with %d: check RPC_URL and CHAIN",
+			got, a.cfg.Chain.Slug, a.cfg.Chain.ChainID)
+	}
+	return nil
+}
+
 // header is the subset of a block header the service needs. Decoded from
 // strings for the same reason Log is: one unexpected field must not cost the
 // whole response.

@@ -14,6 +14,12 @@ mainnet; everything else is arithmetic from those numbers and is labelled.
 | **Balance request, steady state** | _pending_ per request | Only entries a transfer touched, or that reached the age limit |
 | **Age limit** | at most 5,000 batches / day at 5k users | Arithmetic: one batch per active account per day. This is what re-reading rebasing tokens costs |
 
+On **Linea** the same arithmetic gives ~250 `eth_getLogs` for the whole 501k-block
+backfill (2,000 blocks per call, at ~1.7 logs per block) and ~31,000 calls / day
+to follow the tip: 21,600 head polls, ~9,600 single-block `eth_getLogs` at ~9 s
+blocks, and 480 tag reads. Neither has been measured from `/metrics` yet. See
+[measurements](measurements.md#second-network-linea).
+
 Tip following does not depend on how many users there are. Only balance refreshes
 do, and those follow on-chain activity in the accounts being polled.
 
