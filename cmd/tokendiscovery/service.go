@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"time"
 
+	"tokendiscovery/internal/balances"
+	"tokendiscovery/internal/chains"
 	"tokendiscovery/internal/chains/evm"
 	"tokendiscovery/internal/config"
 	"tokendiscovery/internal/indexer"
@@ -20,10 +22,12 @@ import (
 // on the store layout, the decoder version and the chain configuration, because
 // one writes what the other continues from.
 type service struct {
-	client  *rpc.Client
-	adapter *evm.Adapter
-	store   *store.Store
-	indexer *indexer.Indexer
+	client   *rpc.Client
+	adapter  *evm.Adapter
+	registry *chains.Registry
+	store    *store.Store
+	indexer  *indexer.Indexer
+	balances balances.Reader
 }
 
 func openService(cfg config.Config, log *slog.Logger, m *obs.Metrics) (*service, error) {
@@ -76,7 +80,29 @@ func openService(cfg config.Config, log *slog.Logger, m *obs.Metrics) (*service,
 		return nil, fmt.Errorf("indexer: %w", err)
 	}
 
-	return &service{client: client, adapter: adapter, store: st, indexer: ix}, nil
+	registry, err := chains.NewRegistry(adapter)
+	if err != nil {
+		_ = st.Close()
+		return nil, err
+	}
+
+	// Cache-only for now: the API's contract is complete, and a miss is
+	// reported as "unavailable" rather than as a zero. Phase 8 wraps this with
+	// the Multicall3 reader that fills the misses — one line, here.
+	bal, err := balances.NewCached(st, m)
+	if err != nil {
+		_ = st.Close()
+		return nil, err
+	}
+
+	return &service{
+		client:   client,
+		adapter:  adapter,
+		registry: registry,
+		store:    st,
+		indexer:  ix,
+		balances: bal,
+	}, nil
 }
 
 func (s *service) Close() error { return s.store.Close() }

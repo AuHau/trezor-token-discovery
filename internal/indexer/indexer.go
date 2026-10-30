@@ -1019,3 +1019,11 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 		return nil
 	}
 }
+
+// LagBlocks is how far the indexed head trails the last tip this instance saw.
+// It is part of api.Indexing: every discovery response carries it, so a client
+// can tell "this account holds no tokens" from "this instance is behind".
+func (ix *Indexer) LagBlocks() uint64 { return ix.Status().LagBlocks() }
+
+// LatestSeenBlock is the highest chain tip this instance has observed.
+func (ix *Indexer) LatestSeenBlock() uint64 { return ix.Status().LatestBlock }

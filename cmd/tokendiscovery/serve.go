@@ -50,17 +50,22 @@ func cmdServe(ctx context.Context, args []string, cfg config.Config, log *slog.L
 		"parser_version", cursor.ParserVersion,
 	)
 
-	// Phases 7–8 mount the discovery handlers here. Readiness is already real:
-	// it is backed by the indexer's own position, so /readyz reports whether
-	// this instance is caught up rather than merely running.
-	log.Warn("discovery endpoints are not wired yet",
-		"phase", 7, "available", []string{"/healthz", "/readyz", "/metrics"})
-
 	handler := api.NewRouter(api.Deps{
 		Registry: m.Registry,
 		Gatherer: m.Registry,
-		Ready:    svc.indexer,
+		Metrics:  m,
+		Indexer:  svc.indexer,
+		Chains:   svc.registry,
+		Store:    svc.store,
+		Balances: svc.balances,
 		Version:  buildVersion(),
+		Logger:   log,
+	})
+	log.Info("api mounted", "routes", []string{
+		"/v1/chains",
+		"/v1/chains/{chain}/accounts/{address}/tokens",
+		"/v1/status",
+		"/healthz", "/readyz", "/metrics",
 	})
 
 	srv := &http.Server{

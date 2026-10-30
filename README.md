@@ -33,7 +33,7 @@ Built incrementally against the implementation plan.
 | 4 | Log decoder: shape classification, digests, golden + fuzz tests | ✅ |
 | 5 | Pebble store: keyspace, merge-based writes, checkpoints | ✅ |
 | 6 | Indexer: backfill, tip follower, reorg handling | ✅ |
-| 7 | REST API | ⬜ |
+| 7 | REST API: discovery, pagination, ETags, status | ✅ |
 | 8 | Balances (Multicall3) | ⬜ |
 | 9 | ERC-721 endpoint | ⬜ |
 | 10 | Docs and load test | ⬜ |
@@ -45,7 +45,7 @@ cp .env.example .env     # add your RPC_URL (it carries an API key — .env is g
 make                     # fmt, vet, test, build
 
 ./bin/tokendiscovery version
-./bin/tokendiscovery serve          # /healthz, /readyz, /metrics (discovery lands in phase 7)
+./bin/tokendiscovery serve          # the API, /healthz, /readyz, /metrics
 ```
 
 `/readyz` is backed by the indexer's own position: an instance that is up but
@@ -86,6 +86,90 @@ mainnet (2026-10-29, full detail in [`docs/measurements.md`](docs/measurements.m
 | `eth_getLogs` limits | a 10,000-**block** range cap, *no* result cap — and a bare HTTP 413 past ~200k blocks |
 | Full 50-day backfill | ~1.8k calls, ~9 GB gzipped, **~25 min** of RPC (see below for the measured end-to-end figure) |
 | Concurrency | **flat** (238 blocks/s at 1 worker, 278 at 16) — so the backfill is a sequential loop |
+
+## The API
+
+```
+GET /v1/chains                                           configured networks
+GET /v1/chains/{chain}/accounts/{address}/tokens          discovery
+GET /v1/status                                            what this instance has indexed
+GET /healthz · /readyz · /metrics                         operational
+```
+
+The discovery call is the one the assignment asks for, and in steady state it
+costs **one Pebble prefix scan and zero RPC calls**:
+
+```sh
+curl "localhost:8080/v1/chains/ethereum/accounts/0x9De9…Ce33/tokens?standard=erc721"
+```
+
+```json
+{
+  "chain": "ethereum", "chainId": 1,
+  "account": "0x9De929252c9017FE8A4Cd5986475a658aD87Ce33",
+  "standard": "erc721",
+  "block": {
+    "height": 26304253,
+    "hash": "0x715e4d46…",
+    "safe": 26304190,
+    "finalized": 26304158,
+    "unconfirmed": true
+  },
+  "freshness": { "ready": true, "lagBlocks": 0, "latestSeenBlock": 26304253 },
+  "tokens": [
+    { "address": "0x4857DB576eE0e45F10525eC59527BfD10beeC60b",
+      "standard": "erc721", "firstBlock": 26290000, "lastBlock": 26304240 }
+  ]
+}
+```
+
+| Parameter | |
+|---|---|
+| `standard` | `erc20` (default) or `erc721` — the bonus endpoint is the same route |
+| `limit` | 1–1000, default 100 |
+| `cursor` | the `nextCursor` from the previous page (a token address) |
+| `balances` | include the current balance per token |
+| `include_zero` | keep tokens whose balance reads zero (dropped by default) |
+
+Four things in that response are deliberate:
+
+- **`block.height` is the answer to "as of when?"** — the assignment's
+  requirement, taken from the index cursor rather than from a live `eth_blockNumber`,
+  so it describes the data actually returned.
+- **`block.unconfirmed`** says the height is above the safe watermark, so a
+  token could still be reorged out. The pair set is add-only, so the risk is an
+  extra token, never a missing one.
+- **`freshness`** is in *every* response, not just `/readyz`, because "this
+  account holds no tokens" and "this instance is 500 blocks behind" must never
+  look the same.
+- **Balances are a decimal string**, not a JSON number. A uint256 does not fit
+  in a float64, so a number would silently lose precision in every JavaScript
+  client.
+
+A balance carries a `status`, because there are three honest answers and not
+two: `ok` is provably current (the cache entry is clean, so no transfer has
+touched the pair since it was read), `stale` is a real value a later transfer
+invalidated, and `unavailable` means no value — never a zero standing in for
+one. **Live reads land in phase 8**; until then `balances=true` serves the
+cache and reports every miss as `unavailable`, which is why the examples above
+omit the field.
+
+Errors are RFC 9457 problem documents with a stable `type`, so a client can
+branch on the kind rather than parse prose — and a mixed-case address that
+fails its EIP-55 checksum is **rejected**, because the alternative is answering
+a typo with a perfectly valid empty token list:
+
+```json
+{ "type": "https://trezor.io/errors/address-checksum",
+  "title": "Invalid account address", "status": 400,
+  "detail": "address failed EIP-55 checksum verification",
+  "requestId": "Deving/a3uWtaLyJm-000008" }
+```
+
+Every response carries an `ETag` and honours `If-None-Match`, which is a
+*bandwidth* saving rather than an RPC one — the RPC saving is the cache's job —
+and `td_http_bytes_saved_by_304_total` is there to show which of the two
+actually happened.
 
 ## Keeping up with the chain
 
@@ -204,7 +288,9 @@ internal/core/
   ports/              the interfaces everything is built against
 internal/config/      env-based configuration, with phase-1 measurements as defaults
 internal/obs/         slog + the Prometheus metric set
-internal/api/         router, health, metrics, RFC 9457 errors
+internal/api/         router, discovery handlers, ETags, RFC 9457 errors
+internal/balances/    balance resolution: cache-clean vs stale vs unavailable
+internal/chains/      the registry that resolves a chain slug to its adapter
 internal/chains/evm/  generic EVM adapter (shared by every EVM network)
 internal/store/       Pebble index: keyspace, merge operators, checkpoints
 internal/indexer/     backfill, tip follower, reorg handling, readiness
