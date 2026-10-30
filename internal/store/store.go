@@ -306,6 +306,24 @@ func (s *Store) Rewind(ctx context.Context, chainID uint64, toBlock uint64) erro
 	return nil
 }
 
+// BlockHash reads the hash recorded for an indexed block.
+//
+// It is the reorg detector's ancestor oracle: the store already holds a hash
+// per block it indexed, so the walk back to a common ancestor compares against
+// durable state rather than an in-memory window that a restart would have
+// emptied. ok is false when the block was never indexed, or when it carried no
+// transfer logs and so has no digest.
+func (s *Store) BlockHash(ctx context.Context, chainID uint64, block uint64) (domain.Hash, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.Hash{}, false, err
+	}
+	d, ok, err := s.blockDigest(chainID, block)
+	if err != nil || !ok {
+		return domain.Hash{}, false, err
+	}
+	return d.Hash, true, nil
+}
+
 // blockDigest reads one stored per-block digest.
 func (s *Store) blockDigest(chainID, block uint64) (domain.BlockDigest, bool, error) {
 	value, closer, err := s.db.Get(digestKey(chainID, block))

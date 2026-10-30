@@ -32,7 +32,7 @@ Built incrementally against the implementation plan.
 | 3 | RPC client: limiter, retry, deadlines, error classification | ✅ |
 | 4 | Log decoder: shape classification, digests, golden + fuzz tests | ✅ |
 | 5 | Pebble store: keyspace, merge-based writes, checkpoints | ✅ |
-| 6 | Indexer (backfill + tip follower + reorgs) | ⬜ |
+| 6 | Indexer: backfill, tip follower, reorg handling | ✅ |
 | 7 | REST API | ⬜ |
 | 8 | Balances (Multicall3) | ⬜ |
 | 9 | ERC-721 endpoint | ⬜ |
@@ -48,22 +48,29 @@ make                     # fmt, vet, test, build
 ./bin/tokendiscovery serve          # /healthz, /readyz, /metrics (discovery lands in phase 7)
 ```
 
+`/readyz` is backed by the indexer's own position: an instance that is up but
+behind the tip reports **not ready** and is taken out of rotation rather than
+answering with a stale head.
+
+```sh
+```
+
 `backfill` must complete before `serve` will start. Serving a half-indexed store
 would return confidently wrong *empty* token lists — the one failure mode that
 genuinely misleads a user — so it is made impossible rather than described in
 the API.
 
 ```sh
-./bin/tokendiscovery backfill                # seed the store (phase 6)
+./bin/tokendiscovery backfill                # seed the store (~75 min, ~1.8k requests)
 ./bin/tokendiscovery serve                   # follow the tip and answer queries
 ./bin/tokendiscovery checkpoint -out ./snap  # clone the store for a new replica
 ```
 
-That gate is still a warning rather than a refusal, because `backfill` lands in
-phase 6 and an unsatisfiable gate would only make the health and metrics
-endpoints unreachable. `checkpoint` takes the store's directory lock, so it
-needs the service stopped; doing it from a live instance is an admin endpoint
-that lands with the API.
+`backfill` is interruptible: the cursor is committed with every range, so
+re-running it resumes rather than restarting. For a fast demo,
+`backfill -from-block N` seeds a short span instead of the full 50 days.
+`checkpoint` takes the store's directory lock, so it needs the service stopped;
+doing it from a live instance is an admin endpoint that lands with the API.
 
 ## Measured, not assumed
 
@@ -77,8 +84,81 @@ mainnet (2026-10-29, full detail in [`docs/measurements.md`](docs/measurements.m
 | Logs unclassifiable by shape | **3 in 1,148,860** — which is why there is no ERC-165 probe |
 | `Accept-Encoding: gzip` | **14.5× smaller, 12× faster** — the single most important detail in the RPC client |
 | `eth_getLogs` limits | a 10,000-**block** range cap, *no* result cap — and a bare HTTP 413 past ~200k blocks |
-| Full 50-day backfill | ~1.8k calls, ~9 GB gzipped, **~25 min** |
+| Full 50-day backfill | ~1.8k calls, ~9 GB gzipped, **~25 min** of RPC (see below for the measured end-to-end figure) |
 | Concurrency | **flat** (238 blocks/s at 1 worker, 278 at 16) — so the backfill is a sequential loop |
+
+## Keeping up with the chain
+
+[`internal/indexer`](internal/indexer) has two modes, and the split is the
+design:
+
+**Backfill** sweeps from the start block to the tip in 200-block ranges — one
+sequential loop, because concurrency was measured and buys ~15% (see above), so
+the ordered-commit machinery a parallel sweep needs would be paid for nothing.
+It commits the cursor with every range, so an interrupted sweep resumes instead
+of restarting, and `SeededFromBlock` is written only on completion so a
+half-indexed store can never be served from.
+
+**Follow** tracks the tip block by block and compares each new block's parent
+hash against the hash it already indexed. That comparison is in memory and
+free, which is what makes reorg detection affordable on *every* block rather
+than on a timer. When it fails, the walk back to the common ancestor consults
+two oracles — the in-memory header window first, then the store's per-block
+digests — so a reorg that happened while the service was *down* is still
+resolved exactly, with the store rewound to the real ancestor rather than a
+guessed distance. A reorg deeper than the window can be resolved is fatal on
+purpose: on a chain that finalises in two epochs it means a broken or lying
+provider, and indexing an unverified branch is worse than stopping.
+
+If the follower falls a long way behind — an outage, a restart after hours —
+it catches up in ranged scans up to the **safe** watermark, where there is
+nothing to reorg and so nothing for the per-block walk to protect, then
+switches back to block-by-block at the tip.
+
+### Measured end to end
+
+One run against mainnet on 2026-10-30, seeding blocks 26,290,000 → 26,304,142
+(`backfill -from-block 26290000`) and then following the tip:
+
+| | |
+|---|---|
+| Backfill | 14,143 blocks in **2m52s** — **82 blocks/s**, 71 `eth_getLogs` calls |
+| Logs seen | 7,965,057 — **563 per block**, against the 574 phase 1 predicted |
+| Pairs written | 7,361,858 |
+| Store | **330 MB** for 14k blocks, with pair dedup still improving across the span |
+| Steady state | 7 blocks indexed in 70s on **26 requests** (~22/min), head lag ~8s |
+
+Two corrections to the phase-1 projections, both worth stating plainly:
+
+1. **82 blocks/s, not 238.** The phase-1 figure measured RPC alone; decoding
+   and writing the pairs is now in the loop. The full 365,796-block span is
+   therefore **~75 minutes**, not ~25 — still a one-off cost, and still one a
+   checkpoint saves every later replica from paying.
+2. **The store is bigger than the "low single-digit GB" estimate implies at
+   this span.** 330 MB per 14k blocks does not extrapolate linearly — dedup
+   improves the further the sweep runs, which is exactly what the growth curve
+   in `docs/measurements.md` shows — but the honest statement today is that
+   the full-span figure has been *projected*, not measured. Phase 10 measures
+   it.
+
+### Unreliable RPC, in layers
+
+The assignment asks how the service copes with an RPC that is slow, erroring,
+rate-limiting or behind the tip. Each of those is handled where it is cheapest,
+not in one catch-all:
+
+| | |
+|---|---|
+| Slow | per-method deadlines; `eth_getLogs` gets the long one, header reads fail fast so a tick can retry |
+| Erroring | the client retries a *call* with full-jitter backoff; the indexer retries a *range*; neither kills the follower, which keeps trying while `/readyz` reports not-ready |
+| Rate limiting | a client-side token bucket that **shrinks on a 429**, so the service settles below the provider's limit instead of bouncing off it |
+| Range too large | classified as "make it smaller" — including a bare HTTP 413 — and the scan range halves, stickily, for the rest of the run |
+| Behind the tip | every request is clamped to the head the node itself reported; a head that moves *backwards* (a lagging pool member) retargets the sweep instead of failing it |
+| Lying | logs are checked against the header's block hash, since `eth_getLogs` carries no `removed` flag, and a mismatch is counted and refused rather than indexed |
+
+Steady state costs about **20 requests a minute** — one head poll per tick, one
+`eth_getLogs` per block, and the safe/finalized tags on an epoch cadence — and
+that figure is independent of how many users the service has.
 
 ## The store
 
@@ -127,6 +207,7 @@ internal/obs/         slog + the Prometheus metric set
 internal/api/         router, health, metrics, RFC 9457 errors
 internal/chains/evm/  generic EVM adapter (shared by every EVM network)
 internal/store/       Pebble index: keyspace, merge operators, checkpoints
+internal/indexer/     backfill, tip follower, reorg handling, readiness
 tools/measure/        phase-1 measurement tool
 testdata/             captured mainnet logs + hand-written edge cases
 docs/                 architecture notes, measurements, assignment

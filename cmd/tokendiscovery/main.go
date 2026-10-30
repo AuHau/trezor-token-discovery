@@ -161,10 +161,25 @@ func cmdBackfill(ctx context.Context, args []string, cfg config.Config, log *slo
 		cfg.Chain.StartBlock = *fromBlock
 		log.Info("start block overridden", "from_block", *fromBlock)
 	}
-	_ = ctx
-	_ = m
-	// Phase 6. Needs the RPC client (3), decoder (4) and store (5).
-	return fmt.Errorf("backfill: %w (phase 6)", errNotImplemented)
+
+	svc, err := openService(cfg, log, m)
+	if err != nil {
+		return fmt.Errorf("backfill: %w", err)
+	}
+	defer svc.Close()
+
+	if err := svc.indexer.Backfill(ctx); err != nil {
+		if ctx.Err() != nil {
+			// Interrupted rather than broken. The cursor is committed per
+			// range, so re-running resumes from where this stopped.
+			log.Info("backfill interrupted; re-run to resume",
+				"head_block", svc.indexer.Status().HeadBlock)
+			return nil
+		}
+		return fmt.Errorf("backfill: %w", err)
+	}
+	log.Info("store is seeded", "store_bytes", svc.store.DiskUsage())
+	return svc.Close()
 }
 
 func cmdCheckpoint(ctx context.Context, args []string, cfg config.Config, log *slog.Logger, m *obs.Metrics) error {

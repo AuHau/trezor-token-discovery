@@ -110,6 +110,15 @@ type Store interface {
 	// ones and the add-only set absorbs the rest.
 	Rewind(ctx context.Context, chainID uint64, toBlock uint64) error
 
+	// BlockHash reads the hash recorded for an indexed block.
+	//
+	// This is the reorg detector's ancestor oracle, and it is persistent on
+	// purpose: an in-memory window of recent headers is empty right after a
+	// restart, which is exactly when a reorg that happened while the service
+	// was down has to be resolved. ok is false when the block was never
+	// indexed, or when it carried no logs and so has no digest.
+	BlockHash(ctx context.Context, chainID uint64, block uint64) (domain.Hash, bool, error)
+
 	// AccountTokens reads one page of the index.
 	AccountTokens(ctx context.Context, q AccountTokensQuery) (AccountTokensPage, error)
 

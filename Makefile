@@ -1,7 +1,7 @@
 BIN := bin/tokendiscovery
 PKG := ./cmd/tokendiscovery
 
-.PHONY: all build test test-race test-integration golden fuzz lint fmt vet tidy clean measure measure-curve run-serve
+.PHONY: all build test test-race test-integration golden fuzz lint fmt vet tidy clean measure measure-curve run-serve run-backfill-demo
 
 all: fmt vet test build
 
@@ -47,6 +47,11 @@ measure-curve:
 
 run-serve: build
 	$(BIN) serve
+
+# A short backfill for a demo: seeds ~14k blocks in a few minutes instead of
+# sweeping the full 50-day span.
+run-backfill-demo: build
+	$(BIN) backfill -from-block 26290000
 
 clean:
 	rm -rf bin data
