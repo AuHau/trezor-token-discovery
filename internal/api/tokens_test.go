@@ -208,11 +208,6 @@ func TestAccountTokens(t *testing.T) {
 	if resp.Block.Height != headBlock || resp.Block.Safe != safeBlock {
 		t.Errorf("block = %+v, want height %d / safe %d", resp.Block, headBlock, safeBlock)
 	}
-	// The head is above the safe watermark, so these tokens could still be
-	// reorged out and the response has to say so.
-	if !resp.Block.Unconfirmed {
-		t.Error("unconfirmed = false, but the head is above the safe watermark")
-	}
 	if len(resp.Tokens) != 1 {
 		t.Fatalf("got %d tokens, want 1 erc20", len(resp.Tokens))
 	}
@@ -229,6 +224,84 @@ func TestAccountTokens(t *testing.T) {
 	}
 	if resp.NextCursor != "" {
 		t.Errorf("nextCursor = %q on a complete page", resp.NextCursor)
+	}
+}
+
+func TestUnconfirmedIsPerToken(t *testing.T) {
+	// The head is above the safe watermark in all of these, so a page-level
+	// answer could not tell them apart.
+	tests := []struct {
+		name        string
+		first, last uint64
+		want        bool
+	}{
+		{"entirely below safe", safeBlock - 10, safeBlock - 5, false},
+		{"first transfer at safe", safeBlock, safeBlock, false},
+		// Touched recently, but it would stay listed whatever that block's fate.
+		{"held, then touched above safe", safeBlock - 10, headBlock, false},
+		{"first transfer above safe", safeBlock + 1, headBlock, true},
+	}
+
+	h := newHarness(t, nil)
+	var pairs []domain.AccountToken
+	for i, tc := range tests {
+		pairs = append(pairs,
+			pair(uint64(10+i), domain.StandardERC20, tc.first, tc.last),
+			pair(uint64(20+i), domain.StandardERC721, tc.first, tc.last),
+		)
+	}
+	h.seed(t, pairs...)
+	account := addr(1).Checksum()
+
+	tokens := decodeTokens(t, h.get(t, tokensPath(account)))
+	nfts := decodeNFTs(t, h.get(t, nftsPath(account)))
+	if len(tokens.Tokens) != len(tests) || len(nfts.Collections) != len(tests) {
+		t.Fatalf("got %d tokens and %d collections, want %d of each", len(tokens.Tokens), len(nfts.Collections), len(tests))
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tokens.Tokens[i]; got.Address != addr(uint64(10+i)).Checksum() || got.Unconfirmed != tc.want {
+				t.Errorf("token = %+v, want unconfirmed %v", got, tc.want)
+			}
+			if got := nfts.Collections[i]; got.Address != addr(uint64(20+i)).Checksum() || got.Unconfirmed != tc.want {
+				t.Errorf("collection = %+v, want unconfirmed %v", got, tc.want)
+			}
+		})
+	}
+
+	// The field is there when false too: "confirmed" has to be stated, and the
+	// page no longer answers for its tokens.
+	body := h.get(t, tokensPath(account)).Body.String()
+	if !strings.Contains(body, `"unconfirmed":false`) {
+		t.Errorf("a confirmed token should say so: %s", body)
+	}
+	if strings.Count(body, `"unconfirmed":`) != len(tests) {
+		t.Errorf("want the flag once per token and nowhere else: %s", body)
+	}
+}
+
+func TestDiscoveryETagChangesWhenATokenConfirms(t *testing.T) {
+	// The flag clears once, with nothing else on the token changing. If the
+	// validator ignored it, a polling client would get 304s and show the token
+	// as unconfirmed for good.
+	h := newHarness(t, nil)
+	h.seed(t, pair(10, domain.StandardERC20, headBlock, headBlock))
+	path := tokensPath(addr(1).Checksum())
+
+	first := h.get(t, path)
+	if !decodeTokens(t, first).Tokens[0].Unconfirmed {
+		t.Fatal("a token first seen above safe is reported as confirmed")
+	}
+
+	// The cursor advances until the watermark passes the token's first block.
+	h.seedNFTs(t, headBlock+1, safeBlock)
+
+	second := h.get(t, path, [2]string{"If-None-Match", first.Header().Get("ETag")})
+	if second.Code != http.StatusOK {
+		t.Fatalf("after the token confirmed: status %d, want 200 with a new validator", second.Code)
+	}
+	if decodeTokens(t, second).Tokens[0].Unconfirmed {
+		t.Error("still unconfirmed once the watermark passed its first block")
 	}
 }
 

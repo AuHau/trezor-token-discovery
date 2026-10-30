@@ -172,9 +172,6 @@ components:
         hash: { type: string }
         safe: { type: integer }
         finalized: { type: integer }
-        unconfirmed:
-          type: boolean
-          description: The height is above the safe watermark.
     Freshness:
       type: object
       properties:
@@ -203,6 +200,9 @@ components:
         standard: { type: string }
         firstBlock: { type: integer }
         lastBlock: { type: integer }
+        unconfirmed:
+          type: boolean
+          description: firstBlock is above the safe watermark, so this token could still be reorged out.
         symbol: { type: string }
         name: { type: string }
         decimals: { type: integer }
@@ -233,6 +233,9 @@ components:
         address: { type: string }
         firstBlock: { type: integer }
         lastBlock: { type: integer }
+        unconfirmed:
+          type: boolean
+          description: firstBlock is above the safe watermark, so this collection could still be reorged out.
         symbol: { type: string }
         name: { type: string }
         ownedCount: { $ref: "#/components/schemas/OwnedCount" }

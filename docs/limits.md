@@ -39,11 +39,11 @@ would take. Numbers come from [measurements](measurements.md) and the
 
 | Limit | What happens |
 |---|---|
-| **A reorg can leave an extra token.** | Pairs are not deleted on a rewind, so a token seen only on an orphaned branch stays listed. With balances it reads zero and is filtered. |
+| **A reorg can leave an extra token.** | Pairs are not deleted on a rewind, so a token seen only on an orphaned branch stays listed. With balances it reads zero and is filtered. Its `unconfirmed` flag clears once `safe` passes its `firstBlock`, so the flag says a token can no longer be reorged out, not that it survived. |
 | **Any reorg flushes the balance cache.** | Simple and correct, at the cost of one round of re-reads. |
 | **A reorg deeper than the 128-header window is fatal,** as is one below the ownership view. | The service stops instead of indexing an unverified branch or reporting owners from a dead one. On mainnet this means a lying provider or broken finality, and the store has to be rebuilt. |
 | **A real finality stall** falls back to a 12-block depth. | Serving continues, but the ownership view's guarantee is only as good as that depth until finality returns. The threshold is per chain: 256 blocks on Ethereum, 21,600 on Linea, where finality normally trails by ~4 h. |
-| **On Linea, `unconfirmed` lasts hours.** | Linea's `safe` equals `finalized` (proven on L1), so `block.unconfirmed` is true for anything newer than the last proof. That is accurate, but it means something different from Ethereum's ~6 minutes. The ERC-721 ownership view trails by the same ~4 h. |
+| **On Linea, `unconfirmed` lasts hours.** | Linea's `safe` equals `finalized` (proven on L1), so `unconfirmed` is true for any token first seen after the last proof. That is accurate, but it means something different from Ethereum's ~6 minutes. The ERC-721 ownership view trails by the same ~4 h. |
 | **On Linea, the sequencer is trusted up to finality.** | Linea has a single sequencer and in practice does not reorg, but nothing stops it from doing so before a proof lands. The usual reorg handling still runs. |
 | **A restart on Linea catches up block by block above `safe`.** | Bulk catch-up stops at `safe`, which is ~1,700 blocks behind, so the rest costs one header and one `eth_getLogs` per block: ~3.4k calls and a few minutes before `/readyz`. |
 

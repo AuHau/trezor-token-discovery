@@ -37,10 +37,10 @@ func (d Deps) writeCacheable(w http.ResponseWriter, r *http.Request, body any) {
 // Hashing the whole body would be useless here. The height moves every 12
 // seconds, so for a client polling once a minute the validator would always have
 // changed and a 304 would never happen. So the validator holds what a client
-// acts on: tokens, ranges, metadata, balance values and their status. A 304 stays
-// honest because the current head still travels in X-Block-Number and
-// X-Block-Hash, which a 304 may carry, and because a token or balance that
-// actually changes changes the validator.
+// acts on: tokens, ranges, confirmation, metadata, balance values and their
+// status. A 304 stays honest because the current head still travels in
+// X-Block-Number and X-Block-Hash, which a 304 may carry, and because a token or
+// balance that actually changes changes the validator.
 //
 // private is load-bearing: this is per-account balance data.
 func (d Deps) writeDiscovery(w http.ResponseWriter, r *http.Request, body, validator any, block blockInfo) {

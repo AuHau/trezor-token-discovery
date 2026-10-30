@@ -157,13 +157,13 @@ In steady state, plain discovery costs one Pebble prefix scan and zero RPC calls
     "height": 26304253,
     "hash": "0x715e4d46…",
     "safe": 26304190,
-    "finalized": 26304158,
-    "unconfirmed": true
+    "finalized": 26304158
   },
   "freshness": { "ready": true, "lagBlocks": 0, "latestSeenBlock": 26304253 },
   "tokens": [
     { "address": "0x4857DB576eE0e45F10525eC59527BfD10beeC60b",
-      "standard": "erc20", "firstBlock": 26290000, "lastBlock": 26304240 }
+      "standard": "erc20", "firstBlock": 26290000, "lastBlock": 26304240,
+      "unconfirmed": false }
   ]
 }
 ```
@@ -179,9 +179,10 @@ Reading the response:
 
 - **`block.height`** is the height the data is valid for, taken from the index cursor
   rather than a live `eth_blockNumber`, so it describes the data actually returned.
-- **`block.unconfirmed`** means the height is above the safe watermark, so a token
-  could still be reorged out. The pair set is add-only, so the risk is an extra token,
-  never a missing one.
+- **`unconfirmed`**, on each token, means its `firstBlock` is above the safe watermark,
+  so it could still be reorged out. A newer `lastBlock` does not count, because the
+  token stays listed either way. The pair set is add-only, so the risk is an extra
+  token, never a missing one.
 - **`freshness`** is in every response, because "this account holds no tokens" and
   "this instance is 500 blocks behind" must never look the same.
 - **`balance.raw`** is a decimal string, because a uint256 does not fit in a float64.
@@ -208,7 +209,7 @@ curl "localhost:8080/v1/chains/ethereum/accounts/0xDa021A2C1C2F99574D861Ef8c6fA7
   "tokenIdsThroughBlock": 26304572,
   "collections": [
     { "address": "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85",
-      "firstBlock": 26303190, "lastBlock": 26304666,
+      "firstBlock": 26303190, "lastBlock": 26304666, "unconfirmed": false,
       "ownedCount": { "count": "18163", "block": 26304669, "status": "ok" },
       "knownTokenIds": ["215693765813587502…", "…"],
       "tokenIdsTruncated": true }

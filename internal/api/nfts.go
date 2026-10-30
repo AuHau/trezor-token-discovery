@@ -49,6 +49,11 @@ type nftEntry struct {
 	FirstBlock uint64 `json:"firstBlock"`
 	LastBlock  uint64 `json:"lastBlock"`
 
+	// Unconfirmed is true when FirstBlock is above the safe watermark, as for
+	// tokens. It is about this collection being listed, not the known IDs,
+	// which stop at finality regardless.
+	Unconfirmed bool `json:"unconfirmed"`
+
 	Symbol string `json:"symbol,omitempty"`
 	Name   string `json:"name,omitempty"`
 
@@ -107,9 +112,10 @@ func (d Deps) handleAccountNFTs(w http.ResponseWriter, r *http.Request) {
 
 	for _, p := range x.page.Pairs {
 		entry := nftEntry{
-			Address:    p.Token.Checksum(),
-			FirstBlock: p.FirstBlock,
-			LastBlock:  p.LastBlock,
+			Address:     p.Token.Checksum(),
+			FirstBlock:  p.FirstBlock,
+			LastBlock:   p.LastBlock,
+			Unconfirmed: x.unconfirmed(p),
 		}
 		if m, ok := x.meta[p.Token]; ok && m.Resolved {
 			entry.Symbol, entry.Name = m.Symbol, m.Name

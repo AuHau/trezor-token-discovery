@@ -56,11 +56,6 @@ type blockInfo struct {
 
 	Safe      uint64 `json:"safe"`
 	Finalized uint64 `json:"finalized"`
-
-	// Unconfirmed is true when Height is above the safe watermark, so some of
-	// these tokens could still be reorged out. The pair set is add-only, so
-	// the risk is an extra token, never a missing one.
-	Unconfirmed bool `json:"unconfirmed"`
 }
 
 // freshnessInfo exposes how far behind the chain this instance is, so a client
@@ -81,6 +76,11 @@ type tokenEntry struct {
 	// and balance are separate questions, answered separately.
 	FirstBlock uint64 `json:"firstBlock"`
 	LastBlock  uint64 `json:"lastBlock"`
+
+	// Unconfirmed is true when FirstBlock is above the safe watermark, so this
+	// token could still be reorged out. The pair set is add-only, so the risk
+	// is an extra token, never a missing one.
+	Unconfirmed bool `json:"unconfirmed"`
 
 	Symbol   string `json:"symbol,omitempty"`
 	Name     string `json:"name,omitempty"`
@@ -260,15 +260,23 @@ func (d Deps) discover(w http.ResponseWriter, r *http.Request, standard domain.S
 // block describes the height this page is valid for.
 func (x *discovery) block() blockInfo {
 	b := blockInfo{
-		Height:      x.cursor.HeadBlock,
-		Safe:        x.cursor.SafeBlock,
-		Finalized:   x.cursor.FinalizedBlock,
-		Unconfirmed: x.cursor.HeadBlock > x.cursor.SafeBlock,
+		Height:    x.cursor.HeadBlock,
+		Safe:      x.cursor.SafeBlock,
+		Finalized: x.cursor.FinalizedBlock,
 	}
 	if !x.cursor.HeadHash.IsZero() {
 		b.Hash = x.cursor.HeadHash.Hex()
 	}
 	return b
+}
+
+// unconfirmed reports whether a pair could still be reorged out of the list.
+//
+// It goes by FirstBlock because that is what puts a pair in the list. A later
+// transfer above the watermark can only move LastBlock, so a long-held token
+// that was touched a minute ago is not in doubt.
+func (x *discovery) unconfirmed(p domain.AccountToken) bool {
+	return p.FirstBlock > x.cursor.SafeBlock
 }
 
 func (x *discovery) nextCursor() string {
@@ -313,10 +321,11 @@ func (d Deps) handleAccountTokens(w http.ResponseWriter, r *http.Request) {
 
 	for _, p := range x.page.Pairs {
 		entry := tokenEntry{
-			Address:    p.Token.Checksum(),
-			Standard:   p.Standard.String(),
-			FirstBlock: p.FirstBlock,
-			LastBlock:  p.LastBlock,
+			Address:     p.Token.Checksum(),
+			Standard:    p.Standard.String(),
+			FirstBlock:  p.FirstBlock,
+			LastBlock:   p.LastBlock,
+			Unconfirmed: x.unconfirmed(p),
 		}
 		if m, ok := x.meta[p.Token]; ok && m.Resolved {
 			decimals := m.Decimals
@@ -344,6 +353,8 @@ func (d Deps) handleAccountTokens(w http.ResponseWriter, r *http.Request) {
 
 // validator is the page without what moves on its own: the heights, and the
 // lag. Readiness stays, because "not caught up" must not revalidate as unchanged.
+// So does each token's unconfirmed flag: it clears only once per token, and a
+// client revalidating into a 304 would otherwise hold on to it forever.
 func (t tokensResponse) validator() tokensResponse {
 	t.Block = blockInfo{}
 	t.Freshness = freshnessInfo{Ready: t.Freshness.Ready}
