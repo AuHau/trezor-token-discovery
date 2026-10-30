@@ -53,6 +53,11 @@ var (
 	// empty result.
 	ErrBeyondHead = errors.New("requested range is beyond the chain head")
 
+	// ErrExecutionFailed means the node ran the call and the EVM rejected it: a
+	// revert, or running out of gas. Retrying the same call cannot help, but a
+	// batch containing a hostile contract can succeed once it is split.
+	ErrExecutionFailed = errors.New("call execution failed")
+
 	// ErrPermanent is a request the provider will never accept: a bad method,
 	// malformed params, or a rejected call. Retrying is pointless.
 	ErrPermanent = errors.New("permanent rpc error")
@@ -66,6 +71,8 @@ const (
 	codeInternalError  = -32603
 	codeRateLimited    = -32005 // not standard, but common across providers
 	codeRangeLimit     = -32614 // QuickNode's eth_getLogs range cap
+
+	codeExecutionReverted = 3 // geth's eth_call revert
 )
 
 // classify maps a provider error onto a behavioural class.
@@ -84,6 +91,16 @@ const (
 // range-halving loop that never backs off.
 func classify(code int, msg string) error {
 	m := strings.ToLower(msg)
+
+	// 0. The EVM rejected the call. Checked first because a revert reason is
+	//    text a contract chose, so it must not be matched by the patterns below.
+	switch {
+	case code == codeExecutionReverted,
+		strings.Contains(m, "execution reverted"),
+		strings.Contains(m, "out of gas"),
+		strings.Contains(m, "gas required exceeds"):
+		return ErrExecutionFailed
+	}
 
 	// 1. Block-range cap. Measured on QuickNode: -32614, "eth_getLogs is
 	//    limited to a 10,000 range".
@@ -124,7 +141,8 @@ func classify(code int, msg string) error {
 		strings.Contains(m, "range is in the future"),
 		strings.Contains(m, "future block"),
 		strings.Contains(m, "header not found"),
-		strings.Contains(m, "missing trie node"):
+		strings.Contains(m, "missing trie node"),
+		strings.Contains(m, "historical state"):
 		return ErrBeyondHead
 	}
 

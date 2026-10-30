@@ -64,11 +64,8 @@ type Store interface {
 
 // Cached resolves balances from the store alone, with no chain access.
 //
-// This is the whole read path when the cache is warm, and on its own it is the
-// phase-7 resolver: the API contract — value, block, status — is complete, and
-// what a cache miss means ("unavailable") is honest rather than provisional.
-// Phase 8 wraps it with a Multicall3 reader that fills the misses; nothing in
-// the API changes when it does.
+// This is the whole read path when the cache is warm. Live wraps it with the
+// chain reads that fill what it cannot answer.
 type Cached struct {
 	store Store
 	m     *obs.Metrics

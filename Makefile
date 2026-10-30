@@ -30,9 +30,10 @@ tidy:
 golden:
 	go test ./internal/chains/evm -run Golden -update
 
-# The decoder parses untrusted provider output, so fuzz it.
+# The decoders parse untrusted provider output, so fuzz them.
 fuzz:
-	go test ./internal/chains/evm -run=Fuzz -fuzz=FuzzDecode -fuzztime=60s
+	go test ./internal/chains/evm -run=Fuzz -fuzz='^FuzzDecode$$' -fuzztime=60s
+	go test ./internal/chains/evm -run=Fuzz -fuzz='^FuzzDecodeAggregate3$$' -fuzztime=60s
 
 # Integration tests against a real endpoint (skipped without RPC_URL).
 test-integration:

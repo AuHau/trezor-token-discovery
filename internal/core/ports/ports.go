@@ -22,13 +22,22 @@ type BalanceReader interface {
 	// two calls in one response cannot silently execute at different heights.
 	// Implementations return one Balance per requested token, in order, with a
 	// per-token error rather than failing the whole call when one contract
-	// reverts.
+	// reverts. A non-nil error means some tokens could not be read at all; the
+	// slice is still complete, with those entries carrying Err and no value.
+	//
+	// The execution height is reported per Balance and can differ from atBlock
+	// when the node no longer holds that state. Callers must trust Block rather
+	// than assume the pin held.
 	Balances(ctx context.Context, account domain.Address, tokens []domain.TokenRef, atBlock uint64) ([]domain.Balance, error)
 }
 
 // MetadataReader reads token display metadata. Results are cached for the
 // lifetime of the store, so implementations may be slow and are called rarely.
 type MetadataReader interface {
+	// Metadata returns an entry for each token the contract was actually asked
+	// about, with Resolved false if it had no usable answer. A token missing
+	// from the result was not asked about, which the non-nil error explains,
+	// and must not be recorded as having no metadata.
 	Metadata(ctx context.Context, tokens []domain.TokenRef) ([]domain.TokenMeta, error)
 }
 

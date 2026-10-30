@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
 
@@ -104,7 +105,8 @@ type balanceEntry struct {
 //
 // This is the request the whole service exists for, and in the steady state it
 // costs: one Pebble prefix scan, one metadata lookup, one cached-balance
-// lookup. Zero RPC calls.
+// lookup. Zero RPC calls. Only balances=true can spend any, and only for
+// entries the cache cannot prove current.
 func (d Deps) handleAccountTokens(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -217,7 +219,17 @@ func (d Deps) handleAccountTokens(w http.ResponseWriter, r *http.Request) {
 
 	var resolved map[domain.Address]balances.Resolved
 	if withBalances && d.Balances != nil {
+		// Metadata is resolved here rather than on every discovery call so that
+		// balances stays the one parameter that can cost RPC. The two run side
+		// by side so that a slow provider costs one budget, not two.
+		var metaDone sync.WaitGroup
+		if d.Metadata != nil {
+			metaDone.Go(func() {
+				meta = d.Metadata.Fill(ctx, info.ChainID, standard, tokens, meta)
+			})
+		}
 		resolved, err = d.Balances.Resolve(ctx, info.ChainID, account, tokens, indexCursor.HeadBlock)
+		metaDone.Wait()
 		if err != nil {
 			d.serverError(w, r, "resolve balances", err)
 			return
@@ -253,14 +265,20 @@ func (d Deps) handleAccountTokens(w http.ResponseWriter, r *http.Request) {
 			LastBlock:  p.LastBlock,
 		}
 		if m, ok := meta[p.Token]; ok && m.Resolved {
-			decimals := m.Decimals
-			entry.Symbol, entry.Name, entry.Decimals = m.Symbol, m.Name, &decimals
+			entry.Symbol, entry.Name = m.Symbol, m.Name
+			// ERC-721 has no decimals, and reporting 0 would claim it does.
+			if p.Standard == domain.StandardERC20 {
+				decimals := m.Decimals
+				entry.Decimals = &decimals
+			}
 		}
 		if b, ok := resolved[p.Token]; ok {
 			// Zero balances are the harmless residue of airdrop spam and
 			// reorged-out logs, so they are dropped by default — but only when
-			// the value is known to be zero, never when it is merely absent.
-			if !includeZero && b.Status != balances.StatusUnavailable && b.IsZero() {
+			// the value is provably zero. A stale zero is the exact state of an
+			// account that just received this token, so hiding it would hide
+			// the funds.
+			if !includeZero && b.Status == balances.StatusOK && b.IsZero() {
 				resp.OmittedZeroBalances++
 				continue
 			}

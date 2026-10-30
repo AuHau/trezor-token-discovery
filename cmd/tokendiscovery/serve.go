@@ -58,6 +58,7 @@ func cmdServe(ctx context.Context, args []string, cfg config.Config, log *slog.L
 		Chains:   svc.registry,
 		Store:    svc.store,
 		Balances: svc.balances,
+		Metadata: svc.balances,
 		Version:  buildVersion(),
 		Logger:   log,
 	})

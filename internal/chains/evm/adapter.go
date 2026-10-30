@@ -34,10 +34,7 @@ const (
 // Adapter is the EVM implementation of the chain-facing ports.
 //
 // It is parameterised entirely by Config, so every EVM network is served by
-// this one type. The indexing half of ports.ChainAdapter — Chain, Watermarks,
-// Header and ScanAccountTokens — is live; the balance and metadata halves are
-// Multicall3 work and land in phase 8, where the stubs at the bottom of this
-// file are replaced.
+// this one type. The balance and metadata halves live in reads.go.
 type Adapter struct {
 	rpc Caller
 	dec *Decoder
@@ -76,6 +73,13 @@ type Config struct {
 	// strategy and when finality has stalled.
 	ConfirmationDepth uint64
 
+	// MulticallAddress is the Multicall3 deployment used to batch contract
+	// reads. Zero selects the canonical address.
+	MulticallAddress domain.Address
+
+	// MulticallChunk is how many calls go into one eth_call.
+	MulticallChunk int
+
 	Logger  *slog.Logger
 	Metrics *obs.Metrics
 }
@@ -96,6 +100,12 @@ func NewAdapter(client Caller, cfg Config) (*Adapter, error) {
 	}
 	if cfg.ConfirmationDepth == 0 {
 		cfg.ConfirmationDepth = 12
+	}
+	if cfg.MulticallAddress == (domain.Address{}) {
+		cfg.MulticallAddress = Multicall3Address
+	}
+	if cfg.MulticallChunk <= 0 {
+		cfg.MulticallChunk = defaultMulticallChunk
 	}
 	log := cfg.Logger
 	if log == nil {
@@ -356,27 +366,5 @@ func (a *Adapter) ScanAccountTokens(ctx context.Context, from, to uint64) (domai
 
 // hexUint64 formats a block number as a JSON-RPC quantity.
 func hexUint64(n uint64) string { return "0x" + strconv.FormatUint(n, 16) }
-
-// errBalancesUnimplemented is returned by the two reader halves of
-// ports.ChainAdapter until the Multicall3 work lands in phase 8.
-//
-// They exist now, failing loudly, rather than being absent: ports.ChainAdapter
-// is the seam the whole architecture is built on, and a registry that cannot
-// hold the one adapter there is would be a worse lie than a method that says
-// exactly what it does not do yet. Nothing calls them in phase 7 — the API's
-// balance resolver reads the store's cache and reports a miss as
-// "unavailable" — so the failure path is reachable only by a caller that has
-// got ahead of itself.
-var errBalancesUnimplemented = errors.New("evm: live balance reads land in phase 8 (Multicall3)")
-
-// Balances implements ports.BalanceReader.
-func (a *Adapter) Balances(ctx context.Context, account domain.Address, tokens []domain.TokenRef, atBlock uint64) ([]domain.Balance, error) {
-	return nil, errBalancesUnimplemented
-}
-
-// Metadata implements ports.MetadataReader.
-func (a *Adapter) Metadata(ctx context.Context, tokens []domain.TokenRef) ([]domain.TokenMeta, error) {
-	return nil, errBalancesUnimplemented
-}
 
 var _ ports.ChainAdapter = (*Adapter)(nil)

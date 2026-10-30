@@ -66,6 +66,10 @@ func (o Options) withDefaults() Options {
 // starting work. That is honest rather than ideal, and it is acceptable because
 // these calls are local reads measured in microseconds, not network round trips.
 type Store struct {
+	// rewindMu orders balance writes against the flush a reorg performs. See
+	// PutBalances.
+	rewindMu sync.RWMutex
+
 	db       *pebble.DB
 	log      *slog.Logger
 	readOnly bool
@@ -253,6 +257,8 @@ func (s *Store) Rewind(ctx context.Context, chainID uint64, toBlock uint64) erro
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	s.rewindMu.Lock()
+	defer s.rewindMu.Unlock()
 
 	cursor, err := s.cursor(chainID)
 	if err != nil {
@@ -463,6 +469,13 @@ func (s *Store) CachedBalances(ctx context.Context, chainID uint64, account doma
 // ever recover. The write is a merge, not a set, so a concurrent invalidation
 // at a higher block survives it — see balanceMerger.
 //
+// A read above the index head is skipped too, and that rule is what makes a
+// reorg safe. A read in flight when Rewind runs may have executed on the branch
+// being dropped; landing after the flush, it would look clean, because the
+// canonical transfers that replace it can be stamped at or below its block and
+// so never mark it dirty. Every such read is above the rewound head, and
+// rewindMu makes the check and the commit atomic against the flush.
+//
 // The commit is not synced. The balance cache is derived state: losing it to a
 // machine crash costs one round of re-reads, which is not worth an fsync on a
 // path that runs per request.
@@ -470,12 +483,23 @@ func (s *Store) PutBalances(ctx context.Context, chainID uint64, account domain.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	s.rewindMu.RLock()
+	defer s.rewindMu.RUnlock()
+
+	cursor, err := s.cursor(chainID)
+	if err != nil {
+		return err
+	}
+
 	b := s.db.NewBatch()
 	defer b.Close()
 
 	n := 0
 	for _, bal := range balances {
 		if !bal.OK() {
+			continue
+		}
+		if cursor.Seeded() && bal.Block > cursor.HeadBlock {
 			continue
 		}
 		value, err := encodeBalance(bal.Raw, bal.Block, 0)

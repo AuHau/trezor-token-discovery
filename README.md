@@ -34,7 +34,7 @@ Built incrementally against the implementation plan.
 | 5 | Pebble store: keyspace, merge-based writes, checkpoints | ✅ |
 | 6 | Indexer: backfill, tip follower, reorg handling | ✅ |
 | 7 | REST API: discovery, pagination, ETags, status | ✅ |
-| 8 | Balances (Multicall3) | ⬜ |
+| 8 | Balances (Multicall3) | ✅ |
 | 9 | ERC-721 endpoint | ⬜ |
 | 10 | Docs and load test | ⬜ |
 
@@ -150,9 +150,7 @@ A balance carries a `status`, because there are three honest answers and not
 two: `ok` is provably current (the cache entry is clean, so no transfer has
 touched the pair since it was read), `stale` is a real value a later transfer
 invalidated, and `unavailable` means no value — never a zero standing in for
-one. **Live reads land in phase 8**; until then `balances=true` serves the
-cache and reports every miss as `unavailable`, which is why the examples above
-omit the field.
+one. See [Balances](#balances) for how each one comes about.
 
 Errors are RFC 9457 problem documents with a stable `type`, so a client can
 branch on the kind rather than parse prose — and a mixed-case address that
@@ -170,6 +168,70 @@ Every response carries an `ETag` and honours `If-None-Match`, which is a
 *bandwidth* saving rather than an RPC one — the RPC saving is the cache's job —
 and `td_http_bytes_saved_by_304_total` is there to show which of the two
 actually happened.
+
+## Balances
+
+`balances=true` is the only parameter that can spend RPC, and it only spends it
+on what the cache cannot vouch for. Each token on the page ends up in one of
+three places:
+
+| Cache says | What happens | Cost |
+|---|---|---|
+| clean | served as-is, `ok` | none, however often it is polled |
+| dirty or missing | read live, written back, `ok` | its slot in one multicall |
+| read failed | the old value as `stale`, or `unavailable` if there is none | bounded by the budget |
+
+The reads are one `eth_call` to Multicall3's `aggregate3` per 300 tokens,
+pinned to the page's block by number. A dirty refresh re-reads only the tokens a
+transfer actually touched. Metadata (`symbol`, `name`, `decimals`) is fetched
+once per token alongside the first balance read and kept for the life of the
+store, so plain discovery stays at zero RPC. It is a separate `eth_call` rather
+than extra slots in the balance batch: it happens at most once per token, so
+the saving would not pay for a second port method.
+
+The cases that shaped the design:
+
+- **The block is reported, not assumed.** The batch leads with Multicall3's
+  `getBlockNumber()`, so `balance.block` is what the EVM says it ran at. If the
+  node has lost the pinned state, the read retries at `latest`; a result below
+  the page's height is `stale`, because a transfer could sit in the gap.
+- **No output is not zero.** Calling an address with no code succeeds with empty
+  output. Decoding that as `0` would report a confident zero, so anything but
+  exactly 32 bytes is a failure.
+- **`allowFailure` does not stop a gas burner.** A contract can take 63/64 of the
+  gas and sink the whole batch, so a batch that fails in execution is bisected
+  until the culprit is alone: a few extra calls once, not every balance on the
+  page.
+- **Broken contracts are left alone for 10 minutes.** Nothing stamps a pair when
+  a reverting contract recovers, so it needs a clock, unlike a value. Without
+  it, one broken spam token would cost a call on every poll, indefinitely.
+  Outages are not remembered this way, so they retry immediately.
+- **A read in flight during a reorg is not cached.** It may have run on the
+  dropped branch, and the canonical transfer replacing it can be stamped at or
+  below its block, so it would look clean forever. Reads above the index head
+  are served but never written, and that check is atomic against the flush.
+- **The budget bounds the request.** Live reads get 800 ms; past that, the
+  response goes out with whatever the cache has. A read is shared between
+  concurrent requests for the same page and outlives the caller that started
+  it, so a client hanging up neither aborts it nor wastes it.
+
+Known limits: a gas burner that does *not* sink its batch can leave later tokens
+in it failing, which recovers after the 10-minute window for balances but is
+kept for metadata. Coalescing is per page rather than per token, so overlapping
+pages of different sizes read separately.
+
+### Measured against mainnet
+
+2026-10-30, with an index seeded over the last 400 blocks, on an account with 95
+tokens:
+
+| | |
+|---|---|
+| Cold page, balances and metadata | **0.40 s**, 2 `eth_call`s |
+| Warm page | **~2 ms**, 0 `eth_call`s |
+| Multicall balance vs direct `balanceOf` at the same block | 12 of 12 identical |
+| Non-standard metadata | MKR's `bytes32` symbol decodes correctly |
+| 75 polls at 1/s across 7 new blocks | ~7,180 clean hits, **6 dirty refreshes**, 2 new tokens, 0 degraded |
 
 ## Keeping up with the chain
 
@@ -289,9 +351,9 @@ internal/core/
 internal/config/      env-based configuration, with phase-1 measurements as defaults
 internal/obs/         slog + the Prometheus metric set
 internal/api/         router, discovery handlers, ETags, RFC 9457 errors
-internal/balances/    balance resolution: cache-clean vs stale vs unavailable
+internal/balances/    balance resolution: cache, live reads, budget, degradation
 internal/chains/      the registry that resolves a chain slug to its adapter
-internal/chains/evm/  generic EVM adapter (shared by every EVM network)
+internal/chains/evm/  generic EVM adapter (shared by every EVM network), Multicall3
 internal/store/       Pebble index: keyspace, merge operators, checkpoints
 internal/indexer/     backfill, tip follower, reorg handling, readiness
 tools/measure/        phase-1 measurement tool

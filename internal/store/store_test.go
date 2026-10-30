@@ -440,6 +440,13 @@ func TestBalanceCacheLifecycle(t *testing.T) {
 	}
 	put := func(raw int64, block uint64) {
 		t.Helper()
+		// Reads are only cached at or below the index head, so the head has to
+		// be there first. See TestPutBalancesSkipsReadsAboveTheHead.
+		if c, err := s.Cursor(ctx, testChain); err != nil {
+			t.Fatalf("Cursor: %v", err)
+		} else if c.HeadBlock < block {
+			apply(t, s, block)
+		}
 		err := s.PutBalances(ctx, testChain, account, []domain.Balance{
 			{Token: token, Raw: big.NewInt(raw), Block: block},
 		})
@@ -510,6 +517,48 @@ func TestPutBalancesSkipsFailedReads(t *testing.T) {
 	}
 	if c, ok := got[addr(20)]; !ok || c.Balance.Raw.Int64() != 3 {
 		t.Errorf("successful read = %+v, ok %v; want 3", c, ok)
+	}
+}
+
+func TestPutBalancesSkipsReadsAboveTheHead(t *testing.T) {
+	// The reorg race: a read executes on a branch, Rewind flushes the cache and
+	// drops the branch, then the read lands. If it were kept it would look
+	// clean, and the canonical transfer that replaces the branch can be stamped
+	// at or below its block, so it would never go dirty.
+	s := newStore(t)
+	ctx := context.Background()
+	account, token := addr(1), addr(10)
+
+	apply(t, s, 602, pair(1, 10, domain.StandardERC20, 602, 602))
+	if err := s.Rewind(ctx, testChain, 600); err != nil {
+		t.Fatalf("Rewind: %v", err)
+	}
+
+	orphan := []domain.Balance{{Token: token, Raw: big.NewInt(99), Block: 602}}
+	if err := s.PutBalances(ctx, testChain, account, orphan); err != nil {
+		t.Fatalf("PutBalances: %v", err)
+	}
+	apply(t, s, 602, pair(1, 10, domain.StandardERC20, 602, 602))
+
+	got, err := s.CachedBalances(ctx, testChain, account, []domain.Address{token})
+	if err != nil {
+		t.Fatalf("CachedBalances: %v", err)
+	}
+	if c, ok := got[token]; ok {
+		t.Fatalf("a read from the dropped branch was cached: %+v", c)
+	}
+
+	// At the head is the normal case, and is kept.
+	canonical := []domain.Balance{{Token: token, Raw: big.NewInt(7), Block: 602}}
+	if err := s.PutBalances(ctx, testChain, account, canonical); err != nil {
+		t.Fatalf("PutBalances: %v", err)
+	}
+	got, err = s.CachedBalances(ctx, testChain, account, []domain.Address{token})
+	if err != nil {
+		t.Fatalf("CachedBalances: %v", err)
+	}
+	if c, ok := got[token]; !ok || c.Dirty() || c.Balance.Raw.Int64() != 7 {
+		t.Fatalf("read at the head = %+v, ok %v; want clean 7", c, ok)
 	}
 }
 

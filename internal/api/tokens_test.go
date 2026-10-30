@@ -11,7 +11,9 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
@@ -677,4 +679,166 @@ func TestUnknownAccountIsAnEmptyPageNotAnError(t *testing.T) {
 		t.Error("tokens is null; an empty page must serialise as []")
 	}
 	_ = fmt.Sprint(resp)
+}
+
+// liveHarness is the API over a real store and a real Live resolver, with only
+// the chain faked, so the assertions cover the request's whole RPC behaviour.
+type liveChain struct {
+	fakeAdapter
+	mu        sync.Mutex
+	reads     int
+	metaReads int
+	values    map[domain.Address]*big.Int
+	meta      map[domain.Address]domain.TokenMeta
+	down      bool
+}
+
+func (c *liveChain) Balances(_ context.Context, _ domain.Address, tokens []domain.TokenRef, atBlock uint64) ([]domain.Balance, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.reads++
+	out := make([]domain.Balance, len(tokens))
+	for i, t := range tokens {
+		out[i] = domain.Balance{Token: t.Address, Err: "balance could not be read"}
+		if !c.down {
+			out[i] = domain.Balance{Token: t.Address, Raw: c.values[t.Address], Block: atBlock}
+		}
+	}
+	if c.down {
+		return out, errors.New("provider down")
+	}
+	return out, nil
+}
+
+func (c *liveChain) Metadata(_ context.Context, tokens []domain.TokenRef) ([]domain.TokenMeta, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.metaReads++
+	out := make([]domain.TokenMeta, 0, len(tokens))
+	for _, t := range tokens {
+		m := c.meta[t.Address]
+		m.Token, m.Standard = t.Address, t.Standard
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+func newLiveHarness(t *testing.T, chain *liveChain) *harness {
+	t.Helper()
+	h := newHarness(t, nil)
+	chain.info = domain.ChainInfo{
+		Slug: testSlug, ChainID: testChainID, StartBlock: 25_933_634,
+		Standards:  []domain.Standard{domain.StandardERC20, domain.StandardERC721},
+		Watermarks: domain.WatermarkConsensusTags,
+	}
+	registry, err := chains.NewRegistry(chain)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	live, err := balances.NewLive(h.store, registry, balances.LiveOptions{Budget: 2 * time.Second, Metrics: h.metrics})
+	if err != nil {
+		t.Fatalf("NewLive: %v", err)
+	}
+	h.handler = NewRouter(Deps{
+		Registry: h.metrics.Registry,
+		Gatherer: h.metrics.Registry,
+		Metrics:  h.metrics,
+		Indexer:  stubReadiness{},
+		Chains:   registry,
+		Store:    h.store,
+		Balances: live,
+		Metadata: live,
+		Version:  "test",
+	})
+	return h
+}
+
+func TestLiveBalancesEndToEnd(t *testing.T) {
+	usdc, nft := addr(10), addr(20)
+	chain := &liveChain{
+		values: map[domain.Address]*big.Int{usdc: big.NewInt(1_500_000), nft: big.NewInt(3)},
+		meta: map[domain.Address]domain.TokenMeta{
+			usdc: {Symbol: "USDC", Name: "USD Coin", Decimals: 6, Resolved: true},
+			nft:  {Symbol: "APE", Name: "Apes", Resolved: true},
+		},
+	}
+	h := newLiveHarness(t, chain)
+	h.seed(t, pair(10, domain.StandardERC20, 1, headBlock), pair(20, domain.StandardERC721, 1, headBlock))
+
+	// Plain discovery reaches no provider, whatever is or is not cached.
+	plain := decodeTokens(t, h.get(t, tokensPath(addr(1).Checksum())))
+	if chain.reads != 0 || chain.metaReads != 0 {
+		t.Fatalf("discovery without balances spent RPC: %d reads, %d metadata", chain.reads, chain.metaReads)
+	}
+	if plain.Tokens[0].Balance != nil || plain.Tokens[0].Symbol != "" {
+		t.Errorf("plain discovery = %+v", plain.Tokens[0])
+	}
+
+	// A cold page reads once, and answers in that same response.
+	resp := decodeTokens(t, h.get(t, tokensPath(addr(1).Checksum())+"?balances=true"))
+	if chain.reads != 1 || chain.metaReads != 1 {
+		t.Errorf("cold page: %d reads, %d metadata; want 1 and 1", chain.reads, chain.metaReads)
+	}
+	got := resp.Tokens[0]
+	if got.Balance == nil || got.Balance.Status != "ok" || got.Balance.Raw != "1500000" || got.Balance.Block != headBlock {
+		t.Errorf("balance = %+v, want read live at the page's height", got.Balance)
+	}
+	if got.Symbol != "USDC" || got.Decimals == nil || *got.Decimals != 6 {
+		t.Errorf("metadata = %+v", got)
+	}
+
+	// The second request is the steady state.
+	resp = decodeTokens(t, h.get(t, tokensPath(addr(1).Checksum())+"?balances=true"))
+	if chain.reads != 1 || chain.metaReads != 1 {
+		t.Errorf("warm page spent RPC: %d reads, %d metadata", chain.reads, chain.metaReads)
+	}
+	if resp.Tokens[0].Balance.Status != "ok" {
+		t.Errorf("warm balance = %+v", resp.Tokens[0].Balance)
+	}
+
+	// A transfer invalidates exactly the touched pair, and only that is re-read.
+	chain.values[usdc] = big.NewInt(9)
+	h.seedAt(t, headBlock+1, pair(10, domain.StandardERC20, 1, headBlock+1))
+	resp = decodeTokens(t, h.get(t, tokensPath(addr(1).Checksum())+"?balances=true"))
+	if chain.reads != 2 {
+		t.Errorf("after a transfer: %d reads, want 2", chain.reads)
+	}
+	if b := resp.Tokens[0].Balance; b.Raw != "9" || b.Status != "ok" || b.Block != headBlock+1 {
+		t.Errorf("refreshed balance = %+v", b)
+	}
+
+	// ERC-721 has no decimals to report, and 0 would claim that it does.
+	resp = decodeTokens(t, h.get(t, tokensPath(addr(1).Checksum())+"?balances=true&standard=erc721"))
+	if nftEntry := resp.Tokens[0]; nftEntry.Symbol != "APE" || nftEntry.Decimals != nil || nftEntry.Balance.Raw != "3" {
+		t.Errorf("erc721 entry = %+v", nftEntry)
+	}
+}
+
+func TestStaleZeroIsNotHidden(t *testing.T) {
+	// A zero that a later transfer invalidated is the exact state of an account
+	// that has just received this token. With the provider down, dropping it as
+	// "zero balance" would hide the funds.
+	token := addr(10)
+	chain := &liveChain{down: true, values: map[domain.Address]*big.Int{}}
+	h := newLiveHarness(t, chain)
+	h.seed(t, pair(10, domain.StandardERC20, 1, headBlock))
+	err := h.store.PutBalances(context.Background(), testChainID, addr(1), []domain.Balance{
+		{Token: token, Raw: big.NewInt(0), Block: headBlock},
+	})
+	if err != nil {
+		t.Fatalf("PutBalances: %v", err)
+	}
+	h.seedAt(t, headBlock+1, pair(10, domain.StandardERC20, 1, headBlock+1))
+
+	rec := h.get(t, tokensPath(addr(1).Checksum())+"?balances=true")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("an RPC outage must not fail discovery: status %d", rec.Code)
+	}
+	resp := decodeTokens(t, rec)
+	if len(resp.Tokens) != 1 || resp.OmittedZeroBalances != 0 {
+		t.Fatalf("tokens = %+v, omitted %d; want the stale zero kept", resp.Tokens, resp.OmittedZeroBalances)
+	}
+	if b := resp.Tokens[0].Balance; b.Status != "stale" || b.Raw != "0" || b.Error == "" {
+		t.Errorf("balance = %+v, want a flagged stale zero with a reason", b)
+	}
 }

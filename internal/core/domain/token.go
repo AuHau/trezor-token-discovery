@@ -53,6 +53,10 @@ func ParseStandard(s string) (Standard, bool) {
 type TokenRef struct {
 	ChainID uint64
 	Address Address
+
+	// Standard decides which metadata a contract owes us: ERC-721 has no
+	// decimals, so asking for them would spend a call slot on a certain failure.
+	Standard Standard
 }
 
 // AccountToken is the single fact the index stores: this account interacted
@@ -150,6 +154,10 @@ type Balance struct {
 	Raw   *big.Int
 	Block uint64
 	Err   string
+
+	// Reverted says the contract itself refused to answer, as opposed to the
+	// read never reaching it. Only the second is worth retrying immediately.
+	Reverted bool
 }
 
 // OK reports whether the balance was read successfully.

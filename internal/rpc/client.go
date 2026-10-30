@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -273,6 +274,12 @@ func (c *Client) do(ctx context.Context, method string, body []byte) (json.RawMe
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
+		// A *url.Error quotes the full URL, and provider URLs carry the API
+		// key. These errors reach logs and /readyz, so keep only the cause.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
 		// Transport failures (DNS, refused, reset, timeout) are all worth
 		// another attempt.
 		if ctx.Err() != nil && errors.Is(err, ctx.Err()) {

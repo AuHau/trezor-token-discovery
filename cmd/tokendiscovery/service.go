@@ -27,7 +27,7 @@ type service struct {
 	registry *chains.Registry
 	store    *store.Store
 	indexer  *indexer.Indexer
-	balances balances.Reader
+	balances *balances.Live
 }
 
 func openService(cfg config.Config, log *slog.Logger, m *obs.Metrics) (*service, error) {
@@ -41,6 +41,9 @@ func openService(cfg config.Config, log *slog.Logger, m *obs.Metrics) (*service,
 			// a few hundred bytes and should fail fast so a tick can retry.
 			"eth_getLogs":          cfg.Chain.RPCTimeout,
 			"eth_getBlockByNumber": 15 * time.Second,
+			// Balance reads carry their own much shorter budget; this bounds
+			// the metadata and direct callers that do not.
+			"eth_call": 15 * time.Second,
 		},
 		Retry:   rpc.DefaultRetry(),
 		Metrics: m,
@@ -55,6 +58,8 @@ func openService(cfg config.Config, log *slog.Logger, m *obs.Metrics) (*service,
 		WatermarkPollInterval: cfg.Chain.WatermarkPollInterval,
 		FinalityStallBlocks:   cfg.Chain.FinalityStallBlocks,
 		ConfirmationDepth:     cfg.Chain.ConfirmationDepth,
+		MulticallAddress:      cfg.Chain.MulticallAddress,
+		MulticallChunk:        cfg.Chain.MulticallChunk,
 		Logger:                log,
 		Metrics:               m,
 	})
@@ -86,10 +91,11 @@ func openService(cfg config.Config, log *slog.Logger, m *obs.Metrics) (*service,
 		return nil, err
 	}
 
-	// Cache-only for now: the API's contract is complete, and a miss is
-	// reported as "unavailable" rather than as a zero. Phase 8 wraps this with
-	// the Multicall3 reader that fills the misses — one line, here.
-	bal, err := balances.NewCached(st, m)
+	bal, err := balances.NewLive(st, registry, balances.LiveOptions{
+		Budget:  cfg.Chain.BalanceBudget,
+		Logger:  log,
+		Metrics: m,
+	})
 	if err != nil {
 		_ = st.Close()
 		return nil, err

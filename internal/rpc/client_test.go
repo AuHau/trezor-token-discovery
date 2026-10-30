@@ -414,3 +414,27 @@ func TestNewValidatesOptions(t *testing.T) {
 		t.Error("expected an error without a positive rate")
 	}
 }
+
+func TestTransportErrorsDoNotQuoteTheURL(t *testing.T) {
+	// Provider URLs carry the API key, and these errors reach logs and /readyz.
+	const secret = "s3cret-api-key"
+	c, err := New(Options{
+		URL:   "http://127.0.0.1:1/" + secret,
+		Rate:  1000,
+		Burst: 10,
+		Retry: RetryPolicy{MaxAttempts: 1},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	err = c.Call(context.Background(), nil, "eth_blockNumber")
+	if err == nil {
+		t.Fatal("expected a connection failure")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error leaks the credential: %v", err)
+	}
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("error class lost: %v", err)
+	}
+}

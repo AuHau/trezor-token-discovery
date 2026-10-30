@@ -37,6 +37,12 @@ type Readiness interface {
 	Ready() error
 }
 
+// MetadataFiller completes a page's token metadata from the chain. Optional: a
+// nil one leaves unresolved tokens without a symbol.
+type MetadataFiller interface {
+	Fill(ctx context.Context, chainID uint64, standard domain.Standard, tokens []domain.Address, known map[domain.Address]domain.TokenMeta) map[domain.Address]domain.TokenMeta
+}
+
 // Indexing reports the indexer's position so a response can state how fresh it
 // is. Declared here as the narrow thing the API needs, rather than importing
 // the indexer, so the dependency runs one way only.
@@ -68,6 +74,7 @@ type Deps struct {
 	Chains   ports.Registry
 	Store    Store
 	Balances balances.Reader
+	Metadata MetadataFiller
 
 	Version string
 	Logger  *slog.Logger

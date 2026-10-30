@@ -42,6 +42,8 @@ type Metrics struct {
 	BalanceCacheFlushes prometheus.Counter
 	MulticallCalls      prometheus.Counter
 	MulticallSlots      prometheus.Counter
+	BalanceCoalesced    prometheus.Counter
+	BalanceDegraded     prometheus.Counter
 
 	// API
 	HTTPRequests   *prometheus.CounterVec   // route, status
@@ -114,7 +116,9 @@ func NewMetrics() *Metrics {
 		BalanceCacheDirty:   counter("td_balance_cache_dirty_total", "Balance reads whose cache entry was invalidated by a transfer."),
 		BalanceCacheFlushes: counter("td_balance_cache_flushes_total", "Full balance-cache flushes, one per detected reorg."),
 		MulticallCalls:      counter("td_multicall_calls_total", "Multicall3 eth_call batches issued."),
-		MulticallSlots:      counter("td_multicall_slots_total", "Individual balanceOf calls packed into those batches."),
+		MulticallSlots:      counter("td_multicall_slots_total", "Individual contract calls packed into those batches."),
+		BalanceCoalesced:    counter("td_balance_coalesced_total", "Balance refreshes that shared an in-flight read with another request."),
+		BalanceDegraded:     counter("td_balance_degraded_total", "Tokens a live read could not refresh, served stale or unavailable instead."),
 
 		HTTPRequests:   counterVec("td_http_requests_total", "HTTP requests by route and status.", "route", "status"),
 		HTTPDuration:   histVec("td_http_duration_seconds", "HTTP request latency by route.", httpBuckets, "route"),

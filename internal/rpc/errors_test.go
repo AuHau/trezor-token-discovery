@@ -87,3 +87,26 @@ func TestErrorMessageIncludesContext(t *testing.T) {
 		}
 	}
 }
+
+func TestClassifyExecutionFailures(t *testing.T) {
+	// These are the batches worth splitting, so they must not read as permanent
+	// or be matched by the throttling patterns: a revert reason is text a
+	// contract chose, and "rate limit" is a perfectly legal one.
+	cases := []struct {
+		code int
+		msg  string
+	}{
+		{3, "execution reverted"},
+		{3, "execution reverted: rate limit"},
+		{-32000, "out of gas"},
+		{-32000, "gas required exceeds allowance (50000000)"},
+	}
+	for _, tc := range cases {
+		if got := classify(tc.code, tc.msg); got != ErrExecutionFailed {
+			t.Errorf("classify(%d, %q) = %v, want ErrExecutionFailed", tc.code, tc.msg, got)
+		}
+	}
+	if got := classify(-32000, "historical state abc is not available"); got != ErrBeyondHead {
+		t.Errorf("pruned state classified as %v, want ErrBeyondHead", got)
+	}
+}

@@ -40,8 +40,7 @@ import (
 
 // Chain is the slice of ports.ChainAdapter the indexer needs. Declaring it here
 // rather than depending on the whole port means the indexer can be built and
-// tested against a chain that cannot yet read balances — which is exactly the
-// state the EVM adapter is in until phase 8.
+// tested against a chain that does not read balances.
 type Chain interface {
 	Chain() domain.ChainInfo
 	Watermarks(ctx context.Context) (domain.Watermarks, error)
