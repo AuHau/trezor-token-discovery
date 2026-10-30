@@ -594,6 +594,31 @@ func TestFollowSurvivesTransientProviderFailures(t *testing.T) {
 	assertContiguous(t, indexedBlocks(t, st, fc.info.ChainID), 100, 205)
 }
 
+// The RPC client wraps its per-attempt timeout's error, so an overloaded provider
+// looks like a context error even though nobody asked the follower to stop.
+func TestFollowSurvivesProviderTimeouts(t *testing.T) {
+	fc := newFakeChain(100, 200)
+	ix, st, _ := newHarness(t, fc, nil)
+	if err := ix.Backfill(context.Background()); err != nil {
+		t.Fatalf("Backfill: %v", err)
+	}
+
+	stop := follow(t, ix)
+	waitFor(t, "the first tip poll", func() bool { return ix.Status().Following })
+
+	fc.onScan(func(_ *fakeChain, _, _ uint64) error {
+		return fmt.Errorf("fake: %w: %w", rpc.ErrUnavailable, context.DeadlineExceeded)
+	})
+	fc.advance(5)
+	waitFor(t, "the failure to be recorded", func() bool { return ix.Status().LastError != "" })
+
+	fc.onScan(nil)
+	waitFor(t, "recovery", func() bool { return headBlock(t, st, fc.info.ChainID) == 205 })
+	if err := stop(); err != nil {
+		t.Fatalf("Follow: %v", err)
+	}
+}
+
 func TestFollowCatchesUpInBulkAfterAnOutage(t *testing.T) {
 	// Falling a long way behind must not mean one request per block. Below the
 	// safe watermark there is nothing to reorg, so there is nothing for the

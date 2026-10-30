@@ -584,10 +584,13 @@ func (ix *Indexer) Follow(ctx context.Context) error {
 	for {
 		if err := ix.tick(ctx); err != nil {
 			switch {
-			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-				return nil
 			case errors.Is(err, ErrDeepReorg), errors.Is(err, ports.ErrBelowFinality):
 				return err
+			case ctx.Err() != nil:
+				// This context, not the error: an RPC attempt's own timeout also
+				// wraps context.DeadlineExceeded, and that one is just a slow
+				// provider to retry on the next tick.
+				return nil
 			}
 			ix.noteError(err)
 			ix.log.Warn("tip poll failed; retrying on the next tick", "cause", err)

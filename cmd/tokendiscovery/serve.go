@@ -77,22 +77,43 @@ func cmdServe(ctx context.Context, args []string, cfg config.Config, log *slog.L
 		IdleTimeout:       60 * time.Second,
 	}
 
+	fatal := runServing(ctx, srv, svc.indexer.Follow, log)
+	if err := svc.Close(); err != nil {
+		return errors.Join(fatal, fmt.Errorf("close store: %w", err))
+	}
+	if fatal != nil {
+		return fatal
+	}
+	log.Info("stopped cleanly", "head_block", svc.indexer.Status().HeadBlock)
+	return nil
+}
+
+// runServing runs the HTTP server and the follower until a signal or a fatal
+// error, and returns once the follower has stopped, so the caller can close the
+// store: Pebble panics on a closed database.
+func runServing(ctx context.Context, srv *http.Server, follow func(context.Context) error, log *slog.Logger) error {
+	// Its own context, because a failed HTTP server leaves ctx uncancelled.
+	followCtx, stopFollow := context.WithCancel(ctx)
+	defer stopFollow()
+
 	// The follower and the HTTP server run side by side; either one failing
 	// fatally must bring the process down rather than leave it half alive, so
 	// both report into one channel.
 	errc := make(chan error, 2)
 	go func() {
-		log.Info("http listening", "addr", cfg.HTTPAddr)
+		log.Info("http listening", "addr", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errc <- fmt.Errorf("http server: %w", err)
 			return
 		}
 		errc <- nil
 	}()
+	followDone := make(chan struct{})
 	go func() {
+		defer close(followDone)
 		// Follow returns nil on cancellation. Anything else is fatal: a reorg
 		// deeper than the indexer can resolve, or a store it must not touch.
-		if err := svc.indexer.Follow(ctx); err != nil {
+		if err := follow(followCtx); err != nil {
 			errc <- fmt.Errorf("indexer: %w", err)
 			return
 		}
@@ -109,21 +130,17 @@ func cmdServe(ctx context.Context, args []string, cfg config.Config, log *slog.L
 	case <-ctx.Done():
 		log.Info("shutdown signal received, draining")
 	}
+	stopFollow()
 
 	// Drain with a bounded grace period, independent of the cancelled ctx.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return errors.Join(fatal, fmt.Errorf("graceful shutdown: %w", err))
+	shutdownErr := srv.Shutdown(shutdownCtx)
+	<-followDone
+	if shutdownErr != nil {
+		return errors.Join(fatal, fmt.Errorf("graceful shutdown: %w", shutdownErr))
 	}
-	if err := svc.Close(); err != nil {
-		return errors.Join(fatal, fmt.Errorf("close store: %w", err))
-	}
-	if fatal != nil {
-		return fatal
-	}
-	log.Info("stopped cleanly", "head_block", svc.indexer.Status().HeadBlock)
-	return nil
+	return fatal
 }
 
 // Keep the readiness source honest: a compile-time check that the indexer is
