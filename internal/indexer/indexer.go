@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"tokendiscovery/internal/core/domain"
+	"tokendiscovery/internal/core/ports"
 	"tokendiscovery/internal/obs"
 	"tokendiscovery/internal/rpc"
 )
@@ -585,7 +586,7 @@ func (ix *Indexer) Follow(ctx context.Context) error {
 			switch {
 			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 				return nil
-			case errors.Is(err, ErrDeepReorg):
+			case errors.Is(err, ErrDeepReorg), errors.Is(err, ports.ErrBelowFinality):
 				return err
 			}
 			ix.noteError(err)

@@ -35,7 +35,7 @@ Built incrementally against the implementation plan.
 | 6 | Indexer: backfill, tip follower, reorg handling | ✅ |
 | 7 | REST API: discovery, pagination, ETags, status | ✅ |
 | 8 | Balances (Multicall3) | ✅ |
-| 9 | ERC-721 endpoint | ⬜ |
+| 9 | ERC-721 endpoint | ✅ |
 | 10 | Docs and load test | ⬜ |
 
 ## Quick start
@@ -69,8 +69,9 @@ the API.
 `backfill` is interruptible: the cursor is committed with every range, so
 re-running it resumes rather than restarting. For a fast demo,
 `backfill -from-block N` seeds a short span instead of the full 50 days.
-`checkpoint` takes the store's directory lock, so it needs the service stopped;
-doing it from a live instance is an admin endpoint that lands with the API.
+`checkpoint` takes the store's directory lock, so it needs the service stopped.
+Checkpointing a live instance would need an admin endpoint, which does not exist
+yet.
 
 ## Measured, not assumed
 
@@ -91,7 +92,8 @@ mainnet (2026-10-29, full detail in [`docs/measurements.md`](docs/measurements.m
 
 ```
 GET /v1/chains                                           configured networks
-GET /v1/chains/{chain}/accounts/{address}/tokens          discovery
+GET /v1/chains/{chain}/accounts/{address}/tokens          ERC-20 discovery
+GET /v1/chains/{chain}/accounts/{address}/nfts            ERC-721 discovery
 GET /v1/status                                            what this instance has indexed
 GET /healthz · /readyz · /metrics                         operational
 ```
@@ -100,14 +102,14 @@ The discovery call is the one the assignment asks for, and in steady state it
 costs **one Pebble prefix scan and zero RPC calls**:
 
 ```sh
-curl "localhost:8080/v1/chains/ethereum/accounts/0x9De9…Ce33/tokens?standard=erc721"
+curl "localhost:8080/v1/chains/ethereum/accounts/0x9De9…Ce33/tokens"
 ```
 
 ```json
 {
   "chain": "ethereum", "chainId": 1,
   "account": "0x9De929252c9017FE8A4Cd5986475a658aD87Ce33",
-  "standard": "erc721",
+  "standard": "erc20",
   "block": {
     "height": 26304253,
     "hash": "0x715e4d46…",
@@ -118,14 +120,13 @@ curl "localhost:8080/v1/chains/ethereum/accounts/0x9De9…Ce33/tokens?standard=e
   "freshness": { "ready": true, "lagBlocks": 0, "latestSeenBlock": 26304253 },
   "tokens": [
     { "address": "0x4857DB576eE0e45F10525eC59527BfD10beeC60b",
-      "standard": "erc721", "firstBlock": 26290000, "lastBlock": 26304240 }
+      "standard": "erc20", "firstBlock": 26290000, "lastBlock": 26304240 }
   ]
 }
 ```
 
 | Parameter | |
 |---|---|
-| `standard` | `erc20` (default) or `erc721` — the bonus endpoint is the same route |
 | `limit` | 1–1000, default 100 |
 | `cursor` | the `nextCursor` from the previous page (a token address) |
 | `balances` | include the current balance per token |
@@ -168,6 +169,74 @@ Every response carries an `ETag` and honours `If-None-Match`, which is a
 *bandwidth* saving rather than an RPC one — the RPC saving is the cache's job —
 and `td_http_bytes_saved_by_304_total` is there to show which of the two
 actually happened.
+
+## ERC-721
+
+`/nfts` is the same pipeline with one more table. Collections come from the same
+pairs, and `counts=true` is the same balance path, since an ERC-721 `balanceOf`
+is a count: one request answers both, with no RPC beyond what a dirty entry
+needs.
+
+```sh
+curl "localhost:8080/v1/chains/ethereum/accounts/0xDa02…B7F6/nfts?counts=true&token_ids=true"
+```
+
+```json
+{
+  "chain": "ethereum", "chainId": 1,
+  "account": "0xDa021A2C1C2F99574D861Ef8c6fA745851BEB7F6",
+  "block": { "height": 26304670, "finalized": 26304572, "…": "…" },
+  "tokenIdsThroughBlock": 26304572,
+  "collections": [
+    { "address": "0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85",
+      "firstBlock": 26303190, "lastBlock": 26304666,
+      "ownedCount": { "count": "18163", "block": 26304669, "status": "ok" },
+      "knownTokenIds": ["215693765813587502…", "…"],
+      "tokenIdsTruncated": true }
+  ]
+}
+```
+
+| Parameter | |
+|---|---|
+| `counts` | include the live owned count per collection; the only one that can cost RPC |
+| `token_ids` | include the token IDs the index knows of, at most 100 per collection |
+| `include_zero` | keep collections whose count reads zero (dropped by default) |
+| `limit`, `cursor` | as for `/tokens` |
+
+**The count and the list are two different answers, and they can disagree.**
+`ownedCount` is `balanceOf`, so it is live truth. `knownTokenIds` comes from
+indexed transfers, so it covers only the seeded window (an NFT acquired earlier
+and untouched since is counted but not listed) and only up to
+`tokenIdsThroughBlock`. There is no `tokenIdsComplete` flag, because a matching
+count and list do not prove the list is right: a pre-window token and a recent
+sale can cancel out. Token IDs are decimal strings, since many use the full
+uint256.
+
+**The list stops at finality, because it cannot be undone.** Pairs are add-only,
+so a reorg leaves at worst an extra row. Ownership is last-transfer-wins, so an
+orphaned transfer would leave a token with the wrong owner and nothing to
+correct it. Transfers above the finalized height wait in a per-block journal,
+written atomically with the batch, and a reorg just deletes journal entries. The
+price is that the list trails the head by about two epochs (~13 minutes), and up
+to six minutes more while the finalized tag is cached. A reorg below the view
+stops the service, like one too deep to resolve: it means a lying provider or
+broken finality, and the store has to be rebuilt. If the chain really stops
+finalising for 256 blocks, the watermark falls back to a 12-block depth so the
+view keeps moving, and for that stretch this guarantee is only as good as the
+depth.
+
+Applying a transfer needs no read, because its `from` names the row to remove,
+so the view stays a write stream like the pair index.
+
+Known limits: IDs beyond 100 per collection cannot be paged, only flagged with
+`tokenIdsTruncated`. Ownership comes from events, so a contract that emits a
+non-compliant `Transfer` gets a wrong list for its own collection only. ERC-1155
+is not indexed.
+
+Against mainnet (2026-10-30, 1,500 blocks seeded), `ownerOf` at
+`tokenIdsThroughBlock` agreed with all 29 sampled token IDs across the 8 busiest
+recipients in the window.
 
 ## Balances
 
@@ -331,15 +400,20 @@ served forever without an RPC call. Resolving by block number rather than write
 order is also what stops a late-landing in-flight read from clearing an
 invalidation that still applies.
 
-A reorg takes the opposite treatment per table: per-block digests above the
-common ancestor are dropped and the balance cache is flushed wholesale (every
-cached value is a claim about a height), while account-token pairs are kept —
+A reorg takes the opposite treatment per table: per-block digests and pending
+ERC-721 transfers above the common ancestor are dropped and the balance cache is
+flushed wholesale (every cached value is a claim about a height), while
+account-token pairs are kept —
 re-scanning re-adds the canonical ones, and an orphaned pair is at worst an
 extra token whose live balance reads zero.
 
 `checkpoint` is the scale-out story: Pebble hardlinks the sstables, so cloning a
 multi-GB store costs no extra disk up front and a new replica starts warm
 instead of paying for its own backfill.
+
+The ownership view added schema version 2. A store from an earlier build is
+refused at startup with a message saying to delete it and re-run `backfill`,
+because it never recorded the transfers the view needs.
 
 ## Layout
 
@@ -350,11 +424,11 @@ internal/core/
   ports/              the interfaces everything is built against
 internal/config/      env-based configuration, with phase-1 measurements as defaults
 internal/obs/         slog + the Prometheus metric set
-internal/api/         router, discovery handlers, ETags, RFC 9457 errors
+internal/api/         router, /tokens and /nfts handlers, ETags, RFC 9457 errors
 internal/balances/    balance resolution: cache, live reads, budget, degradation
 internal/chains/      the registry that resolves a chain slug to its adapter
 internal/chains/evm/  generic EVM adapter (shared by every EVM network), Multicall3
-internal/store/       Pebble index: keyspace, merge operators, checkpoints
+internal/store/       Pebble index: keyspace, merge operators, NFT ownership, checkpoints
 internal/indexer/     backfill, tip follower, reorg handling, readiness
 tools/measure/        phase-1 measurement tool
 testdata/             captured mainnet logs + hand-written edge cases

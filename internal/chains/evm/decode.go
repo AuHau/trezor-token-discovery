@@ -240,6 +240,7 @@ func (d *Decoder) Decode(from, to uint64, logs []Log) (domain.AccountTokenBatch,
 			batch.NFTTransfers = append(batch.NFTTransfers, domain.NFTTransfer{
 				Token:    token,
 				TokenID:  tokenID,
+				From:     domain.AddressFromTopic(fromTopic),
 				To:       domain.AddressFromTopic(toTopic),
 				Block:    blockNum,
 				LogIndex: uint32(logIndex),

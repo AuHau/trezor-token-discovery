@@ -125,10 +125,14 @@ func (s SkipCounts) Total() int {
 // NFTTransfer is one ERC-721 ownership change, decoded from the indexed tokenId
 // in topic[3]. Ownership is "last transfer wins", so LogIndex is carried to
 // order transfers within a block — which is also why this view is only ever
-// advanced to the safe watermark, never to an orphan-able head.
+// advanced to the finalized watermark, never to an orphan-able head.
+//
+// From is carried so that applying a transfer needs no read: it says which
+// ownership row to remove.
 type NFTTransfer struct {
 	Token    Address
 	TokenID  Hash // uint256, kept as raw bytes: token IDs routinely exceed 64 bits
+	From     Address
 	To       Address
 	Block    uint64
 	LogIndex uint32

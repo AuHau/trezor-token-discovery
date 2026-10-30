@@ -194,7 +194,7 @@ func TestAccountTokens(t *testing.T) {
 		pair(20, domain.StandardERC721, 26_100_000, 26_200_000),
 	)
 
-	resp := decodeTokens(t, h.get(t, tokensPath(addr(1).Checksum())+"?standard=erc20"))
+	resp := decodeTokens(t, h.get(t, tokensPath(addr(1).Checksum())))
 
 	if resp.Chain != testSlug || resp.ChainID != testChainID || resp.Standard != "erc20" {
 		t.Errorf("response identity = %+v", resp)
@@ -259,7 +259,6 @@ func TestAccountTokensRejectsBadInput(t *testing.T) {
 		},
 		{"not an address", tokensPath("0xnothex"), http.StatusBadRequest, "invalid-address"},
 		{"unknown chain", "/v1/chains/dogecoin/accounts/" + account + "/tokens", http.StatusNotFound, "unknown-chain"},
-		{"unknown standard", tokensPath(account) + "?standard=erc1155", http.StatusBadRequest, "invalid-standard"},
 		{"limit not a number", tokensPath(account) + "?limit=lots", http.StatusBadRequest, "invalid-limit"},
 		{"limit too large", tokensPath(account) + "?limit=100000", http.StatusBadRequest, "invalid-limit"},
 		{"limit zero", tokensPath(account) + "?limit=0", http.StatusBadRequest, "invalid-limit"},
@@ -340,7 +339,7 @@ func TestAccountTokensPagination(t *testing.T) {
 	}
 }
 
-func TestAccountTokensStandardFilter(t *testing.T) {
+func TestEachEndpointServesItsOwnStandard(t *testing.T) {
 	h := newHarness(t, nil)
 	h.seed(t,
 		pair(10, domain.StandardERC20, 1, 2),
@@ -348,15 +347,13 @@ func TestAccountTokensStandardFilter(t *testing.T) {
 	)
 	account := addr(1).Checksum()
 
-	// ERC-20 is the default, because that is what the assignment's endpoint
-	// asks for; ERC-721 is the bonus, reachable by the same route.
 	if resp := decodeTokens(t, h.get(t, tokensPath(account))); len(resp.Tokens) != 1 ||
-		resp.Tokens[0].Standard != "erc20" {
-		t.Errorf("default standard returned %+v, want only erc20", resp.Tokens)
+		resp.Tokens[0].Address != addr(10).Checksum() {
+		t.Errorf("/tokens returned %+v, want only the ERC-20", resp.Tokens)
 	}
-	if resp := decodeTokens(t, h.get(t, tokensPath(account)+"?standard=erc721")); len(resp.Tokens) != 1 ||
-		resp.Tokens[0].Standard != "erc721" {
-		t.Errorf("erc721 filter returned %+v", resp.Tokens)
+	if resp := decodeNFTs(t, h.get(t, nftsPath(account))); len(resp.Collections) != 1 ||
+		resp.Collections[0].Address != addr(20).Checksum() {
+		t.Errorf("/nfts returned %+v, want only the ERC-721", resp.Collections)
 	}
 }
 
@@ -657,7 +654,7 @@ func TestAccountTokensStandardNotIndexed(t *testing.T) {
 	}
 	h.seed(t, pair(10, domain.StandardERC20, 1, 2))
 
-	p := decodeProblem(t, h.get(t, tokensPath(addr(1).Checksum())+"?standard=erc721"), http.StatusBadRequest)
+	p := decodeProblem(t, h.get(t, nftsPath(addr(1).Checksum())), http.StatusBadRequest)
 	if p.Type != problemBase+"standard-not-indexed" {
 		t.Errorf("problem type = %s, want standard-not-indexed", p.Type)
 	}
@@ -807,10 +804,19 @@ func TestLiveBalancesEndToEnd(t *testing.T) {
 		t.Errorf("refreshed balance = %+v", b)
 	}
 
-	// ERC-721 has no decimals to report, and 0 would claim that it does.
-	resp = decodeTokens(t, h.get(t, tokensPath(addr(1).Checksum())+"?balances=true&standard=erc721"))
-	if nftEntry := resp.Tokens[0]; nftEntry.Symbol != "APE" || nftEntry.Decimals != nil || nftEntry.Balance.Raw != "3" {
-		t.Errorf("erc721 entry = %+v", nftEntry)
+	// The NFT endpoint shares the whole path: live count, metadata, cache.
+	nfts := decodeNFTs(t, h.get(t, nftsPath(addr(1).Checksum())+"?counts=true"))
+	if got := nfts.Collections[0]; got.Symbol != "APE" || got.OwnedCount == nil ||
+		got.OwnedCount.Count != "3" || got.OwnedCount.Status != "ok" {
+		t.Errorf("collection = %+v, count %+v", got, got.OwnedCount)
+	}
+	readsBefore := chain.reads
+	nfts = decodeNFTs(t, h.get(t, nftsPath(addr(1).Checksum())+"?counts=true"))
+	if chain.reads != readsBefore {
+		t.Errorf("a warm count spent RPC: %d reads, was %d", chain.reads, readsBefore)
+	}
+	if nfts.Collections[0].OwnedCount.Count != "3" {
+		t.Errorf("warm count = %+v", nfts.Collections[0].OwnedCount)
 	}
 }
 
@@ -840,5 +846,130 @@ func TestStaleZeroIsNotHidden(t *testing.T) {
 	}
 	if b := resp.Tokens[0].Balance; b.Status != "stale" || b.Raw != "0" || b.Error == "" {
 		t.Errorf("balance = %+v, want a flagged stale zero with a reason", b)
+	}
+}
+
+func nftsPath(account string) string {
+	return "/v1/chains/" + testSlug + "/accounts/" + account + "/nfts"
+}
+
+func decodeNFTs(t *testing.T, rec *httptest.ResponseRecorder) nftsResponse {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var out nftsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return out
+}
+
+// seedNFTs applies mints to addr(1) in one batch, with the given block already
+// final or not.
+func (h *harness) seedNFTs(t *testing.T, block, finalized uint64, transfers ...domain.NFTTransfer) {
+	t.Helper()
+	cursor := domain.Cursor{
+		SeededFromBlock: 25_933_634,
+		HeadBlock:       block,
+		HeadHash:        domain.Hash{0xAB, 0xCD},
+		SafeBlock:       block,
+		FinalizedBlock:  finalized,
+		ParserVersion:   1,
+	}
+	batch := domain.AccountTokenBatch{FromBlock: block, ToBlock: block, NFTTransfers: transfers}
+	if err := h.store.ApplyBatch(context.Background(), testChainID, batch, cursor); err != nil {
+		t.Fatalf("ApplyBatch: %v", err)
+	}
+}
+
+func mintTo(token uint64, id *big.Int, block uint64, logIndex uint32) domain.NFTTransfer {
+	var tokenID domain.Hash
+	id.FillBytes(tokenID[:])
+	return domain.NFTTransfer{Token: addr(token), TokenID: tokenID, To: addr(1), Block: block, LogIndex: logIndex}
+}
+
+func TestAccountNFTsKnownTokenIDs(t *testing.T) {
+	h := newHarness(t, nil)
+	h.seed(t, pair(20, domain.StandardERC721, 1, 2), pair(30, domain.StandardERC721, 1, 2))
+
+	// A hash-style ID: it would not survive a JSON number.
+	huge, _ := new(big.Int).SetString("115792089237316195423570985008687907853269984665640564039457584007913129639935", 10)
+	final := headBlock + 1
+	h.seedNFTs(t, final, final, mintTo(20, big.NewInt(7), final, 0), mintTo(20, huge, final, 1))
+
+	// Not final yet: the live count may see it, the ID list must not.
+	pending := final + 1
+	h.seedNFTs(t, pending, final, mintTo(20, big.NewInt(8), pending, 0))
+
+	plain := decodeNFTs(t, h.get(t, nftsPath(addr(1).Checksum())))
+	if plain.Collections[0].KnownTokenIDs != nil || plain.TokenIDsThroughBlock != 0 {
+		t.Errorf("IDs without asking: %+v, through %d", plain.Collections[0], plain.TokenIDsThroughBlock)
+	}
+	rec := h.get(t, nftsPath(addr(1).Checksum()))
+	if strings.Contains(rec.Body.String(), "knownTokenIds") {
+		t.Errorf("the field must be absent unless asked for: %s", rec.Body)
+	}
+
+	resp := decodeNFTs(t, h.get(t, nftsPath(addr(1).Checksum())+"?token_ids=true"))
+	if resp.TokenIDsThroughBlock != final {
+		t.Errorf("through block = %d, want the finalized %d", resp.TokenIDsThroughBlock, final)
+	}
+	if resp.Block.Height != pending {
+		t.Errorf("height = %d, want the head %d: the list trails it, the page does not", resp.Block.Height, pending)
+	}
+	got := resp.Collections[0].KnownTokenIDs
+	if len(got) != 2 || got[0] != "7" || got[1] != huge.String() {
+		t.Errorf("ids = %v, want 7 and the full uint256, in order", got)
+	}
+	// Asked, and none known, is an empty list rather than a missing field.
+	rec = h.get(t, nftsPath(addr(1).Checksum())+"?token_ids=true")
+	if !strings.Contains(rec.Body.String(), `"knownTokenIds":[]`) {
+		t.Errorf("a collection with no known IDs should say so: %s", rec.Body)
+	}
+}
+
+func TestAccountNFTsTruncatesLongLists(t *testing.T) {
+	h := newHarness(t, nil)
+	h.seed(t, pair(20, domain.StandardERC721, 1, 2))
+	block := headBlock + 1
+	mints := make([]domain.NFTTransfer, 0, maxKnownTokenIDs+1)
+	for i := range maxKnownTokenIDs + 1 {
+		mints = append(mints, mintTo(20, big.NewInt(int64(i)), block, uint32(i)))
+	}
+	h.seedNFTs(t, block, block, mints...)
+
+	entry := decodeNFTs(t, h.get(t, nftsPath(addr(1).Checksum())+"?token_ids=true")).Collections[0]
+	if len(entry.KnownTokenIDs) != maxKnownTokenIDs || !entry.TokenIDsTruncated {
+		t.Errorf("listed %d, truncated %v; want %d and true", len(entry.KnownTokenIDs), entry.TokenIDsTruncated, maxKnownTokenIDs)
+	}
+}
+
+func TestAccountNFTsZeroCountsAndBadInput(t *testing.T) {
+	sold, held := addr(20), addr(30)
+	chain := &liveChain{values: map[domain.Address]*big.Int{sold: big.NewInt(0), held: big.NewInt(2)}, meta: map[domain.Address]domain.TokenMeta{}}
+	h := newLiveHarness(t, chain)
+	h.seed(t, pair(20, domain.StandardERC721, 1, 2), pair(30, domain.StandardERC721, 1, 2))
+	account := addr(1).Checksum()
+
+	// Plain discovery, and the ID list, are local reads.
+	decodeNFTs(t, h.get(t, nftsPath(account)+"?token_ids=true"))
+	if chain.reads != 0 || chain.metaReads != 0 {
+		t.Errorf("no-count requests spent RPC: %d reads, %d metadata", chain.reads, chain.metaReads)
+	}
+
+	resp := decodeNFTs(t, h.get(t, nftsPath(account)+"?counts=true"))
+	if len(resp.Collections) != 1 || resp.Collections[0].Address != held.Checksum() || resp.OmittedEmpty != 1 {
+		t.Errorf("collections = %+v, omitted %d; want only the held one", resp.Collections, resp.OmittedEmpty)
+	}
+	resp = decodeNFTs(t, h.get(t, nftsPath(account)+"?counts=true&include_zero=true"))
+	if len(resp.Collections) != 2 || resp.OmittedEmpty != 0 {
+		t.Errorf("include_zero: %+v, omitted %d", resp.Collections, resp.OmittedEmpty)
+	}
+
+	for _, q := range []string{"?token_ids=maybe", "?counts=maybe", "?limit=0", "?cursor=nope"} {
+		if rec := h.get(t, nftsPath(account)+q); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400", q, rec.Code)
+		}
 	}
 }

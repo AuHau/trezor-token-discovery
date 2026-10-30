@@ -16,7 +16,7 @@ import (
 // schema change costs one backfill, while a silent misread would produce
 // confidently wrong *empty* token lists — the one failure mode that genuinely
 // misleads a user.
-const SchemaVersion uint32 = 1
+const SchemaVersion uint32 = 2
 
 // Record encodings are hand-rolled fixed-layout bytes rather than JSON or gob.
 // Three reasons: the store holds tens of millions of records, so 16 bytes

@@ -693,3 +693,21 @@ func TestBackfillDoesNotRewriteTheSeedRecord(t *testing.T) {
 		t.Error("the second run indexed blocks below the cursor")
 	}
 }
+
+func TestFollowIsFatalOnAReorgBelowFinality(t *testing.T) {
+	// The ownership view stops at finality because it cannot be undone. A reorg
+	// below it means the provider lied or finality broke; retrying forever would
+	// hide that, and carrying on would report owners from a dead branch.
+	fc := newFakeChain(100, 200)
+	fc.finalDepth = 2
+	ix, _, _ := newHarness(t, fc, nil)
+	if err := ix.Backfill(context.Background()); err != nil {
+		t.Fatalf("Backfill: %v", err)
+	}
+
+	fc.reorg(190, 201, 9)
+
+	if err := followUntilError(t, ix); !errors.Is(err, ports.ErrBelowFinality) {
+		t.Fatalf("Follow = %v, want ErrBelowFinality", err)
+	}
+}

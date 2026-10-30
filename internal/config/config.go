@@ -126,8 +126,11 @@ func Default() Config {
 			RPCBurst:   50,
 			RPCTimeout: 120 * time.Second, // a 200-block getLogs is multi-MB
 
-			Watermarks:          domain.WatermarkConsensusTags,
-			FinalityStallBlocks: 100,
+			Watermarks: domain.WatermarkConsensusTags,
+			// 8 epochs. Healthy mainnet reaches 96 blocks behind just before an
+			// epoch finalises, plus up to 30 more while the tag is cached, so
+			// anything near that would call every other cycle a stall.
+			FinalityStallBlocks: 256,
 			ConfirmationDepth:   12,
 
 			Standards: []domain.Standard{domain.StandardERC20, domain.StandardERC721},

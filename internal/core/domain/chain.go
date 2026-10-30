@@ -46,8 +46,9 @@ func (w WatermarkStrategy) Valid() bool {
 //
 //   - Latest: discovery and balance pinning. User-facing freshness; failures
 //     here are small and self-healing because the pair set is add-only.
-//   - Safe: the `unconfirmed` flag and ERC-721 ownership ordering.
-//   - Finalized: digests and checkpoints, which must be stable forever.
+//   - Safe: the `unconfirmed` flag.
+//   - Finalized: digests, checkpoints and the ERC-721 ownership view, which
+//     must be stable forever.
 type Watermarks struct {
 	Latest    BlockRef
 	Safe      BlockRef

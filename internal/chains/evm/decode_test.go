@@ -302,6 +302,9 @@ func TestDecodeEdgeCases(t *testing.T) {
 	if nft.To != carol {
 		t.Errorf("NFT new owner = %s, want carol", nft.To)
 	}
+	if nft.From != bob {
+		t.Errorf("NFT previous owner = %s, want bob", nft.From)
+	}
 	if nft.TokenID != domain.MustParseHash("0x000000000000000000000000000000000000000000000000000000000000beef") {
 		t.Errorf("tokenId = %s, want 0x…beef", nft.TokenID)
 	}

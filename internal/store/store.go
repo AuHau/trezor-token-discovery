@@ -223,12 +223,9 @@ func (s *Store) ApplyBatch(ctx context.Context, chainID uint64, batch domain.Acc
 		}
 	}
 
-	// batch.NFTTransfers is deliberately not persisted here. An ownership view
-	// is "last transfer wins" and needs a read side — owner-of-token and
-	// tokens-of-account — whose keyspace is only decidable together with the
-	// endpoint that reads it, so it lands with the ERC-721 endpoint in phase 9.
-	// Nothing is lost: pairs already record the ERC-721 interaction, and a
-	// re-backfill to populate the view is ~25 minutes (docs/measurements.md).
+	if err := s.applyOwnership(b, chainID, batch, cursor); err != nil {
+		return err
+	}
 
 	if err := b.Set(cursorKey(chainID), encodeCursor(cursor), nil); err != nil {
 		return fmt.Errorf("apply batch: write cursor: %w", err)
@@ -265,6 +262,16 @@ func (s *Store) Rewind(ctx context.Context, chainID uint64, toBlock uint64) erro
 		return err
 	}
 
+	// Checked before anything is written: the ownership view cannot be undone,
+	// which is why it stops at finality in the first place.
+	ownedAt, err := s.ownedAt(chainID)
+	if err != nil {
+		return err
+	}
+	if toBlock < ownedAt {
+		return fmt.Errorf("%w: rewind to %d, ownership view is at %d", ports.ErrBelowFinality, toBlock, ownedAt)
+	}
+
 	// The hash of the new head comes from the digest of the block we are
 	// rewinding to, when that block had logs. When it does not, the hash is
 	// cleared rather than guessed: the caller re-reads the header after a
@@ -284,6 +291,11 @@ func (s *Store) Rewind(ctx context.Context, chainID uint64, toBlock uint64) erro
 	digests := chainPrefix(prefixDigest, chainID)
 	if err := b.DeleteRange(digestKey(chainID, toBlock+1), prefixEnd(digests), nil); err != nil {
 		return fmt.Errorf("rewind: drop digests: %w", err)
+	}
+	// ERC-721 transfers that never reached finality.
+	pending := chainPrefix(prefixPending, chainID)
+	if err := b.DeleteRange(pendingKey(chainID, toBlock+1, 0), prefixEnd(pending), nil); err != nil {
+		return fmt.Errorf("rewind: drop pending transfers: %w", err)
 	}
 	// The whole balance cache for this chain.
 	balances := chainPrefix(prefixBalance, chainID)

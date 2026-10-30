@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefaultIsValidWithRPCURL(t *testing.T) {
@@ -94,5 +95,20 @@ func TestRedactedRPCURL(t *testing.T) {
 		if tc.in != "" && strings.Contains(cfg.RedactedRPCURL(), "secret") {
 			t.Errorf("credential survived redaction: %q", cfg.RedactedRPCURL())
 		}
+	}
+}
+
+func TestStallThresholdClearsHealthyFinalityLag(t *testing.T) {
+	// A healthy chain must never trip the fallback, which replaces finality
+	// with a guess. Finalized trails by up to two epochs, and the cached tag
+	// falls further behind for as long as it is cached.
+	const (
+		twoEpochs = 96
+		blockTime = 12 * time.Second
+	)
+	ch := Default().Chain
+	healthy := twoEpochs + uint64(ch.WatermarkPollInterval/blockTime)
+	if ch.FinalityStallBlocks <= healthy {
+		t.Fatalf("stall threshold %d is within healthy lag %d", ch.FinalityStallBlocks, healthy)
 	}
 }

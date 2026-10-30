@@ -196,8 +196,8 @@ func cmdCheckpoint(ctx context.Context, args []string, cfg config.Config, log *s
 	// Pebble locks the store directory, so this needs the service stopped. That
 	// is the honest limitation of a CLI subcommand: taking a checkpoint from a
 	// *running* instance — the interesting case, since the point is to clone a
-	// warm store onto a new replica — is an admin endpoint, and it lands with
-	// the API rather than here.
+	// warm store onto a new replica — would need an admin endpoint on `serve`,
+	// which does not exist yet.
 	st, err := store.Open(cfg.DataDir, store.Options{Logger: log})
 	if err != nil {
 		return fmt.Errorf("checkpoint: %w", err)

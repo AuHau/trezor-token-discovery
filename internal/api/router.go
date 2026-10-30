@@ -58,6 +58,7 @@ type Store interface {
 	Cursor(ctx context.Context, chainID uint64) (domain.Cursor, error)
 	AccountTokens(ctx context.Context, q ports.AccountTokensQuery) (ports.AccountTokensPage, error)
 	TokenMeta(ctx context.Context, chainID uint64, tokens []domain.Address) (map[domain.Address]domain.TokenMeta, error)
+	OwnedTokenIDs(ctx context.Context, chainID uint64, account domain.Address, tokens []domain.Address, limit int) (map[domain.Address]ports.OwnedTokens, uint64, error)
 }
 
 // Deps is what the router needs. The discovery routes mount only when Chains
@@ -135,6 +136,7 @@ func NewRouter(d Deps) http.Handler {
 			// chain a first-class segment rather than a query parameter, which
 			// is what makes a second network a routing no-op.
 			v1.Get("/chains/{chain}/accounts/{address}/tokens", d.handleAccountTokens)
+			v1.Get("/chains/{chain}/accounts/{address}/nfts", d.handleAccountNFTs)
 		})
 	}
 

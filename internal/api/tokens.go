@@ -101,20 +101,37 @@ type balanceEntry struct {
 	Error  string `json:"error,omitempty"`
 }
 
-// handleAccountTokens serves the discovery endpoint.
+// discovery is one validated page of the index, with whatever the request asked
+// to have resolved for it. It is the part the per-standard endpoints share.
+type discovery struct {
+	info    domain.ChainInfo
+	account domain.Address
+
+	// live is the request's opt-in to spending RPC; includeZero only means
+	// anything alongside it.
+	live        bool
+	includeZero bool
+
+	cursor   domain.Cursor
+	page     ports.AccountTokensPage
+	tokens   []domain.Address
+	meta     map[domain.Address]domain.TokenMeta
+	resolved map[domain.Address]balances.Resolved
+}
+
+// discover validates a discovery request and reads its page. On false it has
+// already written the error response.
 //
-// This is the request the whole service exists for, and in the steady state it
-// costs: one Pebble prefix scan, one metadata lookup, one cached-balance
-// lookup. Zero RPC calls. Only balances=true can spend any, and only for
-// entries the cache cannot prove current.
-func (d Deps) handleAccountTokens(w http.ResponseWriter, r *http.Request) {
+// liveParam names the flag that opts in to live reads, which is the one thing
+// the endpoints call differently: an ERC-721 balanceOf is a count.
+func (d Deps) discover(w http.ResponseWriter, r *http.Request, standard domain.Standard, liveParam string) (*discovery, bool) {
 	ctx := r.Context()
 
 	info, ok := d.chainInfo(chi.URLParam(r, "chain"))
 	if !ok {
 		writeProblem(w, r, http.StatusNotFound, "unknown-chain",
 			"Unknown chain", fmt.Sprintf("%q is not a configured chain; see GET /v1/chains", chi.URLParam(r, "chain")))
-		return
+		return nil, false
 	}
 
 	account, err := domain.ParseAddress(chi.URLParam(r, "address"))
@@ -127,83 +144,73 @@ func (d Deps) handleAccountTokens(w http.ResponseWriter, r *http.Request) {
 			kind = "address-checksum"
 		}
 		writeProblem(w, r, http.StatusBadRequest, kind, "Invalid account address", err.Error())
-		return
+		return nil, false
 	}
 
-	q := r.URL.Query()
-
-	standard := domain.StandardERC20
-	if raw := q.Get("standard"); raw != "" {
-		parsed, ok := domain.ParseStandard(raw)
-		if !ok {
-			writeProblem(w, r, http.StatusBadRequest, "invalid-standard",
-				"Unknown token standard", fmt.Sprintf("%q is not one of erc20, erc721", raw))
-			return
-		}
-		standard = parsed
-	}
 	if !info.Supports(standard) {
 		writeProblem(w, r, http.StatusBadRequest, "standard-not-indexed",
 			"Standard not indexed on this chain",
 			fmt.Sprintf("%s does not index %s", info.Slug, standard))
-		return
+		return nil, false
 	}
+
+	q := r.URL.Query()
 
 	limit, err := parseLimit(q.Get("limit"))
 	if err != nil {
 		writeProblem(w, r, http.StatusBadRequest, "invalid-limit", "Invalid limit", err.Error())
-		return
+		return nil, false
 	}
 
-	var cursor *domain.Address
+	var after *domain.Address
 	if raw := q.Get("cursor"); raw != "" {
-		after, err := domain.ParseAddress(raw)
+		parsed, err := domain.ParseAddress(raw)
 		if err != nil {
 			writeProblem(w, r, http.StatusBadRequest, "invalid-cursor",
 				"Invalid cursor", "a cursor is the token address returned as nextCursor: "+err.Error())
-			return
+			return nil, false
 		}
-		cursor = &after
+		after = &parsed
 	}
 
-	withBalances, err := parseBool(q.Get("balances"), false)
+	live, err := parseBool(q.Get(liveParam), false)
 	if err != nil {
-		writeProblem(w, r, http.StatusBadRequest, "invalid-parameter", "Invalid balances flag", err.Error())
-		return
+		writeProblem(w, r, http.StatusBadRequest, "invalid-parameter", "Invalid "+liveParam+" flag", err.Error())
+		return nil, false
 	}
 	includeZero, err := parseBool(q.Get("include_zero"), false)
 	if err != nil {
 		writeProblem(w, r, http.StatusBadRequest, "invalid-parameter", "Invalid include_zero flag", err.Error())
-		return
+		return nil, false
 	}
 
 	// The cursor is the authority on what the index contains, so the block
 	// height in the response comes from it rather than from the indexer's
 	// in-memory view.
-	indexCursor, err := d.Store.Cursor(ctx, info.ChainID)
+	cursor, err := d.Store.Cursor(ctx, info.ChainID)
 	if err != nil {
 		d.serverError(w, r, "read cursor", err)
-		return
+		return nil, false
 	}
-	if !indexCursor.Seeded() {
+	if !cursor.Seeded() {
 		// Answering here would mean returning an empty list that looks like a
 		// real answer. `serve` refuses to boot in this state; this is the
 		// second line of defence.
 		writeProblem(w, r, http.StatusServiceUnavailable, "not-seeded",
 			"Index is not seeded", "the backfill has not completed, so discovery would return empty results")
-		return
+		return nil, false
 	}
 
 	page, err := d.Store.AccountTokens(ctx, ports.AccountTokensQuery{
 		ChainID:  info.ChainID,
 		Account:  account,
 		Standard: standard,
-		After:    cursor,
+		After:    after,
 		Limit:    limit,
 	})
 	if err != nil {
 		d.serverError(w, r, "read account tokens", err)
-		return
+		return nil, false
 	}
 
 	tokens := make([]domain.Address, 0, len(page.Pairs))
@@ -214,13 +221,13 @@ func (d Deps) handleAccountTokens(w http.ResponseWriter, r *http.Request) {
 	meta, err := d.Store.TokenMeta(ctx, info.ChainID, tokens)
 	if err != nil {
 		d.serverError(w, r, "read token metadata", err)
-		return
+		return nil, false
 	}
 
 	var resolved map[domain.Address]balances.Resolved
-	if withBalances && d.Balances != nil {
+	if live && d.Balances != nil {
 		// Metadata is resolved here rather than on every discovery call so that
-		// balances stays the one parameter that can cost RPC. The two run side
+		// this flag stays the one parameter that can cost RPC. The two run side
 		// by side so that a slow provider costs one budget, not two.
 		var metaDone sync.WaitGroup
 		if d.Metadata != nil {
@@ -228,57 +235,94 @@ func (d Deps) handleAccountTokens(w http.ResponseWriter, r *http.Request) {
 				meta = d.Metadata.Fill(ctx, info.ChainID, standard, tokens, meta)
 			})
 		}
-		resolved, err = d.Balances.Resolve(ctx, info.ChainID, account, tokens, indexCursor.HeadBlock)
+		resolved, err = d.Balances.Resolve(ctx, info.ChainID, account, tokens, cursor.HeadBlock)
 		metaDone.Wait()
 		if err != nil {
 			d.serverError(w, r, "resolve balances", err)
-			return
+			return nil, false
 		}
 	}
 
-	resp := tokensResponse{
-		Chain:    info.Slug,
-		ChainID:  info.ChainID,
-		Account:  account.Checksum(),
-		Standard: standard.String(),
-		Block: blockInfo{
-			Height:      indexCursor.HeadBlock,
-			Safe:        indexCursor.SafeBlock,
-			Finalized:   indexCursor.FinalizedBlock,
-			Unconfirmed: indexCursor.HeadBlock > indexCursor.SafeBlock,
-		},
-		Freshness: d.freshness(),
-		Tokens:    make([]tokenEntry, 0, len(page.Pairs)),
+	return &discovery{
+		info:        info,
+		account:     account,
+		live:        live,
+		includeZero: includeZero,
+		cursor:      cursor,
+		page:        page,
+		tokens:      tokens,
+		meta:        meta,
+		resolved:    resolved,
+	}, true
+}
+
+// block describes the height this page is valid for.
+func (x *discovery) block() blockInfo {
+	b := blockInfo{
+		Height:      x.cursor.HeadBlock,
+		Safe:        x.cursor.SafeBlock,
+		Finalized:   x.cursor.FinalizedBlock,
+		Unconfirmed: x.cursor.HeadBlock > x.cursor.SafeBlock,
 	}
-	if !indexCursor.HeadHash.IsZero() {
-		resp.Block.Hash = indexCursor.HeadHash.Hex()
+	if !x.cursor.HeadHash.IsZero() {
+		b.Hash = x.cursor.HeadHash.Hex()
 	}
-	if page.Next != nil {
-		resp.NextCursor = page.Next.Hex()
+	return b
+}
+
+func (x *discovery) nextCursor() string {
+	if x.page.Next == nil {
+		return ""
+	}
+	return x.page.Next.Hex()
+}
+
+// omit reports whether a resolved row is dropped as empty.
+//
+// Zero balances are the harmless residue of airdrop spam and reorged-out logs,
+// so they are dropped by default — but only when the value is provably zero. A
+// stale zero is the exact state of an account that just received this token, so
+// hiding it would hide the funds.
+func (x *discovery) omit(b balances.Resolved) bool {
+	return !x.includeZero && b.Status == balances.StatusOK && b.IsZero()
+}
+
+// handleAccountTokens serves ERC-20 discovery.
+//
+// This is the request the whole service exists for, and in the steady state it
+// costs: one Pebble prefix scan, one metadata lookup, one cached-balance
+// lookup. Zero RPC calls. Only balances=true can spend any, and only for
+// entries the cache cannot prove current.
+func (d Deps) handleAccountTokens(w http.ResponseWriter, r *http.Request) {
+	x, ok := d.discover(w, r, domain.StandardERC20, "balances")
+	if !ok {
+		return
 	}
 
-	for _, p := range page.Pairs {
+	resp := tokensResponse{
+		Chain:      x.info.Slug,
+		ChainID:    x.info.ChainID,
+		Account:    x.account.Checksum(),
+		Standard:   domain.StandardERC20.String(),
+		Block:      x.block(),
+		Freshness:  d.freshness(),
+		Tokens:     make([]tokenEntry, 0, len(x.page.Pairs)),
+		NextCursor: x.nextCursor(),
+	}
+
+	for _, p := range x.page.Pairs {
 		entry := tokenEntry{
 			Address:    p.Token.Checksum(),
 			Standard:   p.Standard.String(),
 			FirstBlock: p.FirstBlock,
 			LastBlock:  p.LastBlock,
 		}
-		if m, ok := meta[p.Token]; ok && m.Resolved {
-			entry.Symbol, entry.Name = m.Symbol, m.Name
-			// ERC-721 has no decimals, and reporting 0 would claim it does.
-			if p.Standard == domain.StandardERC20 {
-				decimals := m.Decimals
-				entry.Decimals = &decimals
-			}
+		if m, ok := x.meta[p.Token]; ok && m.Resolved {
+			decimals := m.Decimals
+			entry.Symbol, entry.Name, entry.Decimals = m.Symbol, m.Name, &decimals
 		}
-		if b, ok := resolved[p.Token]; ok {
-			// Zero balances are the harmless residue of airdrop spam and
-			// reorged-out logs, so they are dropped by default — but only when
-			// the value is provably zero. A stale zero is the exact state of an
-			// account that just received this token, so hiding it would hide
-			// the funds.
-			if !includeZero && b.Status == balances.StatusOK && b.IsZero() {
+		if b, ok := x.resolved[p.Token]; ok {
+			if x.omit(b) {
 				resp.OmittedZeroBalances++
 				continue
 			}

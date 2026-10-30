@@ -9,9 +9,16 @@ package ports
 
 import (
 	"context"
+	"errors"
 
 	"tokendiscovery/internal/core/domain"
 )
+
+// ErrBelowFinality means a reorg reached below state the store made permanent
+// because the chain called it final. It cannot be resolved by rewinding: either
+// the provider is lying or the chain broke finality, and the store has to be
+// rebuilt rather than trusted.
+var ErrBelowFinality = errors.New("reorg below finality")
 
 // BalanceReader reads live token balances. Split out from ChainAdapter so the
 // balance service can depend on just this.
@@ -131,6 +138,12 @@ type Store interface {
 	// AccountTokens reads one page of the index.
 	AccountTokens(ctx context.Context, q AccountTokensQuery) (AccountTokensPage, error)
 
+	// OwnedTokenIDs reads the ERC-721 ownership view for these collections, in
+	// token ID order, at most limit per collection. The block returned is the
+	// height the view has reached: it stops at the finalized watermark, so it
+	// trails the head, and it knows nothing from before the seeded window.
+	OwnedTokenIDs(ctx context.Context, chainID uint64, account domain.Address, tokens []domain.Address, limit int) (map[domain.Address]OwnedTokens, uint64, error)
+
 	// CachedBalances returns what the cache holds for these tokens. Entries
 	// marked dirty by the indexer are returned too, so a degraded read path can
 	// serve them with an honest staleness flag rather than failing.
@@ -151,6 +164,14 @@ type Store interface {
 	Checkpoint(ctx context.Context, dir string) error
 
 	Close() error
+}
+
+// OwnedTokens is one account's known holdings of one collection.
+type OwnedTokens struct {
+	IDs []domain.Hash
+
+	// Truncated says the account holds more than the limit asked for.
+	Truncated bool
 }
 
 // CachedBalance is a stored balance plus the staleness bookkeeping that makes

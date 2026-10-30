@@ -65,6 +65,7 @@ func cmdServe(ctx context.Context, args []string, cfg config.Config, log *slog.L
 	log.Info("api mounted", "routes", []string{
 		"/v1/chains",
 		"/v1/chains/{chain}/accounts/{address}/tokens",
+		"/v1/chains/{chain}/accounts/{address}/nfts",
 		"/v1/status",
 		"/healthz", "/readyz", "/metrics",
 	})

@@ -37,6 +37,9 @@
 //	b <chain:8> <account:20> <token:20>                      → balance cache    (merged)
 //	t <chain:8> <token:20>                                   → token metadata
 //	d <chain:8> <block:8>                                    → block digest
+//	n <chain:8> <block:8> <logIndex:4>                       → pending ERC-721 transfer
+//	o <chain:8> <owner:20> <token:20> <tokenId:32>           → ERC-721 ownership row
+//	w <chain:8>                                              → ownership view's height
 //
 // The pair key is account-major and token-minor, with the standard *last*
 // rather than between the account and the token. That ordering is what makes
@@ -61,6 +64,9 @@ const (
 	prefixBalance byte = 'b'
 	prefixMeta    byte = 't'
 	prefixDigest  byte = 'd'
+	prefixPending byte = 'n'
+	prefixOwned   byte = 'o'
+	prefixOwnedAt byte = 'w'
 )
 
 // schemaKey holds the keyspace version. It sorts before every other key, and
@@ -76,6 +82,7 @@ const (
 	balanceKeyLen = chainKeyLen + domain.AddressLen*2     // + account + token
 	metaKeyLen    = chainKeyLen + domain.AddressLen       // + token
 	digestKeyLen  = chainKeyLen + 8                       // + block
+	pendingKeyLen = digestKeyLen + 4                      // + log index
 )
 
 // chainPrefix is the common head of every per-chain key: prefix || chainID.
@@ -115,6 +122,25 @@ func digestKey(chainID uint64, block uint64) []byte {
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], block)
 	return append(k, buf[:]...)
+}
+
+func pendingKey(chainID uint64, block uint64, logIndex uint32) []byte {
+	k := binary.BigEndian.AppendUint64(chainPrefix(prefixPending, chainID), block)
+	return binary.BigEndian.AppendUint32(k, logIndex)
+}
+
+// ownedPrefix bounds one account's holdings of one collection.
+func ownedPrefix(chainID uint64, owner, token domain.Address) []byte {
+	k := append(chainPrefix(prefixOwned, chainID), owner[:]...)
+	return append(k, token[:]...)
+}
+
+func ownedKey(chainID uint64, owner, token domain.Address, tokenID domain.Hash) []byte {
+	return append(ownedPrefix(chainID, owner, token), tokenID[:]...)
+}
+
+func ownedAtKey(chainID uint64) []byte {
+	return chainPrefix(prefixOwnedAt, chainID)[:chainKeyLen]
 }
 
 // pairToken reads the token address back out of a pair key.

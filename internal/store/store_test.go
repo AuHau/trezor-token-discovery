@@ -941,3 +941,175 @@ func TestConcurrentReadersAndWriter(t *testing.T) {
 		}
 	}
 }
+
+// nftTo builds a transfer of one token ID in collection 10 between test accounts.
+func nftTo(id byte, from, to uint64, block uint64, logIndex uint32) domain.NFTTransfer {
+	t := domain.NFTTransfer{Token: addr(10), TokenID: domain.Hash{31: id}, Block: block, LogIndex: logIndex}
+	if from != 0 {
+		t.From = addr(int(from))
+	}
+	if to != 0 {
+		t.To = addr(int(to))
+	}
+	return t
+}
+
+// applyNFTs applies transfers at head with the given finalized height.
+func applyNFTs(t *testing.T, s *Store, head, finalized uint64, transfers ...domain.NFTTransfer) {
+	t.Helper()
+	cursor := cursorAt(head)
+	cursor.FinalizedBlock = finalized
+	batch := domain.AccountTokenBatch{FromBlock: head, ToBlock: head, NFTTransfers: transfers}
+	if err := s.ApplyBatch(context.Background(), testChain, batch, cursor); err != nil {
+		t.Fatalf("ApplyBatch: %v", err)
+	}
+}
+
+func ownedByAccount(t *testing.T, s *Store, account uint64) ([]byte, uint64) {
+	t.Helper()
+	got, at, err := s.OwnedTokenIDs(context.Background(), testChain, addr(int(account)), []domain.Address{addr(10)}, 100)
+	if err != nil {
+		t.Fatalf("OwnedTokenIDs: %v", err)
+	}
+	ids := []byte{}
+	for _, id := range got[addr(10)].IDs {
+		ids = append(ids, id[31])
+	}
+	return ids, at
+}
+
+func TestOwnershipWaitsForFinality(t *testing.T) {
+	s := newStore(t)
+
+	applyNFTs(t, s, 600, 500, nftTo(1, 0, 1, 600, 0))
+	if ids, at := ownedByAccount(t, s, 1); len(ids) != 0 || at != 500 {
+		t.Fatalf("before finality: ids %v at %d, want none at 500", ids, at)
+	}
+
+	// The transfer is applied by a later batch that carries none of its own.
+	applyNFTs(t, s, 601, 600)
+	if ids, at := ownedByAccount(t, s, 1); string(ids) != "\x01" || at != 600 {
+		t.Fatalf("after finality: ids %v at %d, want token 1 at 600", ids, at)
+	}
+}
+
+func TestOwnershipLastTransferWins(t *testing.T) {
+	s := newStore(t)
+
+	// Delivered out of order within a batch, as a provider may. Applying them
+	// in response order would leave the token with account 2.
+	applyNFTs(t, s, 600, 600,
+		nftTo(1, 2, 3, 600, 9),
+		nftTo(1, 0, 1, 600, 1),
+		nftTo(1, 1, 2, 600, 5),
+	)
+	for account, want := range map[uint64]string{1: "", 2: "", 3: "\x01"} {
+		if ids, _ := ownedByAccount(t, s, account); string(ids) != want {
+			t.Errorf("account %d owns %v, want %q", account, ids, want)
+		}
+	}
+
+	// Across batches, through the journal.
+	applyNFTs(t, s, 610, 600, nftTo(1, 3, 4, 610, 0))
+	applyNFTs(t, s, 611, 600, nftTo(1, 4, 5, 611, 0))
+	applyNFTs(t, s, 612, 611)
+	if ids, _ := ownedByAccount(t, s, 3); len(ids) != 0 {
+		t.Errorf("the previous owner still lists %v", ids)
+	}
+	if ids, _ := ownedByAccount(t, s, 5); string(ids) != "\x01" {
+		t.Errorf("the last owner lists %v", ids)
+	}
+
+	// A burn leaves nobody holding it, and no row for the zero address.
+	applyNFTs(t, s, 620, 620, nftTo(1, 5, 0, 620, 0))
+	if ids, _ := ownedByAccount(t, s, 5); len(ids) != 0 {
+		t.Errorf("a burned token is still listed: %v", ids)
+	}
+}
+
+func TestOwnershipReorgDropsWhatWasNotFinal(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	applyNFTs(t, s, 600, 600, nftTo(1, 0, 1, 600, 0))
+	applyNFTs(t, s, 610, 600, nftTo(1, 1, 2, 610, 0))
+
+	if err := s.Rewind(ctx, testChain, 605); err != nil {
+		t.Fatalf("Rewind: %v", err)
+	}
+	// The canonical branch sends the token elsewhere.
+	applyNFTs(t, s, 610, 600, nftTo(1, 1, 3, 610, 3))
+	applyNFTs(t, s, 611, 610)
+
+	if ids, _ := ownedByAccount(t, s, 2); len(ids) != 0 {
+		t.Errorf("the orphaned transfer's recipient owns %v", ids)
+	}
+	if ids, _ := ownedByAccount(t, s, 3); string(ids) != "\x01" {
+		t.Errorf("the canonical recipient owns %v", ids)
+	}
+}
+
+func TestOwnershipRefusesARewindBelowTheView(t *testing.T) {
+	// The view cannot be undone. A store that quietly carried on would report
+	// owners from a chain that no longer exists.
+	s := newStore(t)
+	applyNFTs(t, s, 600, 590)
+
+	err := s.Rewind(context.Background(), testChain, 589)
+	if !errors.Is(err, ports.ErrBelowFinality) {
+		t.Fatalf("Rewind = %v, want ErrBelowFinality", err)
+	}
+	c, err := s.Cursor(context.Background(), testChain)
+	if err != nil {
+		t.Fatalf("Cursor: %v", err)
+	}
+	if c.HeadBlock != 600 {
+		t.Errorf("head = %d: a refused rewind must change nothing", c.HeadBlock)
+	}
+	if err := s.Rewind(context.Background(), testChain, 590); err != nil {
+		t.Errorf("a rewind to the view's height itself is fine: %v", err)
+	}
+}
+
+func TestOwnershipDuringBackfillStopsAtTheScannedRange(t *testing.T) {
+	// Backfill reports the chain's finalized height, far above where it is.
+	s := newStore(t)
+	applyNFTs(t, s, 600, 26_000_000, nftTo(1, 0, 1, 600, 0))
+	if ids, at := ownedByAccount(t, s, 1); string(ids) != "\x01" || at != 600 {
+		t.Fatalf("ids %v at %d, want token 1 at the scanned 600", ids, at)
+	}
+}
+
+func TestOwnershipDoesNotReplayOldTransfers(t *testing.T) {
+	// Re-scanning a block already in the view would resurrect an old owner.
+	s := newStore(t)
+	applyNFTs(t, s, 600, 600, nftTo(1, 0, 1, 600, 0), nftTo(1, 1, 2, 600, 1))
+	applyNFTs(t, s, 601, 601, nftTo(1, 0, 1, 600, 0))
+	if ids, _ := ownedByAccount(t, s, 1); len(ids) != 0 {
+		t.Errorf("a replayed transfer restored the old owner: %v", ids)
+	}
+}
+
+func TestOwnedTokenIDsTruncates(t *testing.T) {
+	s := newStore(t)
+	applyNFTs(t, s, 600, 600, nftTo(1, 0, 1, 600, 0), nftTo(2, 0, 1, 600, 1), nftTo(3, 0, 1, 600, 2))
+
+	got, _, err := s.OwnedTokenIDs(context.Background(), testChain, addr(1), []domain.Address{addr(10), addr(99)}, 2)
+	if err != nil {
+		t.Fatalf("OwnedTokenIDs: %v", err)
+	}
+	if o := got[addr(10)]; len(o.IDs) != 2 || !o.Truncated || o.IDs[0][31] != 1 {
+		t.Errorf("collection = %+v, want the first two, truncated", o)
+	}
+	if o := got[addr(99)]; len(o.IDs) != 0 || o.Truncated {
+		t.Errorf("a collection with no rows = %+v", o)
+	}
+
+	exact, _, err := s.OwnedTokenIDs(context.Background(), testChain, addr(1), []domain.Address{addr(10)}, 3)
+	if err != nil {
+		t.Fatalf("OwnedTokenIDs: %v", err)
+	}
+	if exact[addr(10)].Truncated {
+		t.Error("exactly the limit is not truncated")
+	}
+}
