@@ -461,7 +461,7 @@ curl localhost:8081/v1/chains/linea/accounts/<address>/tokens?balances=true
 
 `CHAIN` selects a preset in `internal/config` and defaults the store to
 `./data-linea`, so it never shares a directory with the Ethereum store in
-`./data`. At startup `eth_chainId` is checked against the preset before the
+`./data-ethereum`. At startup `eth_chainId` is checked against the preset before the
 store is opened, so pointing a Linea config at an Ethereum endpoint is a startup
 error rather than a mislabelled index. The only value that had to differ from
 Ethereum, apart from the chain itself, is the finality-stall threshold. The

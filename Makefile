@@ -59,10 +59,10 @@ run-serve: build
 run-backfill-demo: build
 	$(BIN) backfill -from-block 26290000
 
-# Keeps ./data: the full-span store takes over an hour of paid RPC to rebuild.
+# Keeps ./data-ethereum: the full-span store takes over an hour of paid RPC to rebuild.
 clean:
 	rm -rf bin
 
 # Deletes the index. Rebuilding it means re-running the backfill.
 clean-data:
-	rm -rf data
+	rm -rf data-ethereum

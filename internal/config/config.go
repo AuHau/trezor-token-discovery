@@ -198,14 +198,9 @@ func Preset(slug string) (ChainConfig, bool) {
 // Presets lists the networks Preset knows, for error messages.
 func Presets() []string { return []string{"ethereum", "linea"} }
 
-// defaultDataDir keeps each network in its own store. Ethereum keeps the
-// original ./data so existing stores stay where they are; every other chain
-// gets a sibling, so selecting a chain can never write into another chain's
-// store by default.
+// defaultDataDir keeps each network in its own store, so selecting a chain can
+// never write into another chain's store by default.
 func defaultDataDir(slug string) string {
-	if slug == DefaultChain {
-		return "./data"
-	}
 	return "./data-" + slug
 }
 

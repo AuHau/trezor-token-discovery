@@ -75,7 +75,7 @@ for real.
 
 ## Demo
 
-Uses the full-span store in `./data`, so nothing needs indexing first.
+Uses the full-span store in `./data-ethereum`, so nothing needs indexing first.
 
 ```sh
 set -a; . ./.env; set +a
